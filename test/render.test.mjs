@@ -200,3 +200,68 @@ test('cache colour is absent without colour', () => {
   input.prompt_cache.expires_at = NOW / 1000 + 100;
   assert.ok(!plain(input).includes('\x1b'));
 });
+
+const KA = (state, extra = {}) => ({ enabled: state !== 'off', state, warmUntil: null, ...extra });
+
+test('keep-alive marker follows the cache clock', () => {
+  const at = (ka) => plain(full(), { keepalive: ka });
+  assert.ok(at(KA('armed')).includes('  │  ⚡  3:12 ↻  │  ⏱'), at(KA('armed')));
+  assert.ok(at(KA('pinging')).includes('⚡  3:12 ⇡  │'));
+  assert.ok(at(KA('paused')).includes('⚡  3:12 ∅  │'));
+  assert.ok(at(KA('off')).includes('⚡  3:12 off  │'));
+});
+
+test('no keep-alive state leaves the line byte-identical', () => {
+  assert.equal(plain(full(), { keepalive: null }), plain(full()));
+  assert.equal(render(full(), { columns: 200, now: NOW, git: GIT, color: true, keepalive: null }),
+    render(full(), { columns: 200, now: NOW, git: GIT, color: true }));
+});
+
+test("the plugin's verified expiry outlives Claude Code's own", () => {
+  const input = full();
+  input.prompt_cache = { warm: false, ttl: '1h', expires_at: null };
+  const line = plain(input, { keepalive: KA('armed', { warmUntil: NOW + 50 * 60 * 1000 }) });
+  assert.ok(line.includes('⚡  50:00 ↻'), line);
+});
+
+test('the later of the two expiries wins', () => {
+  assert.ok(plain(full(), { keepalive: KA('armed', { warmUntil: NOW + 60 * 1000 }) }).includes('⚡  3:12 ↻'));
+  const noClock = full();
+  noClock.prompt_cache.expires_at = null;
+  assert.ok(plain(noClock, { keepalive: KA('armed', { warmUntil: NOW + 600 * 1000 }) }).includes('⚡  10:00 ↻'));
+});
+
+test('an expired plugin expiry does not warm a cold cache', () => {
+  const input = full();
+  input.prompt_cache = { warm: false, ttl: '1h', expires_at: null };
+  assert.ok(plain(input, { keepalive: KA('armed', { warmUntil: NOW - 1 }) }).includes('  │  ❄ ↻  │  '));
+});
+
+test('without a prompt_cache object there is no cache group and no marker', () => {
+  const input = full();
+  delete input.prompt_cache;
+  const line = plain(input, { keepalive: KA('armed') });
+  assert.ok(!line.includes('↻') && !line.includes('⚡'), line);
+});
+
+test('marker colours: armed green, pinging yellow, paused and off grey', () => {
+  const c = (ka) => render(full(), { columns: 200, now: NOW, git: GIT, color: true, keepalive: ka });
+  assert.ok(c(KA('armed')).includes('\x1b[38;5;150m↻\x1b[39m'));
+  assert.ok(c(KA('pinging')).includes('\x1b[38;5;179m⇡\x1b[39m'));
+  assert.ok(c(KA('paused')).includes('\x1b[38;5;245m∅\x1b[39m'));
+  assert.ok(c(KA('off')).includes('\x1b[38;5;245moff\x1b[39m'));
+});
+
+test('an unknown state draws no marker', () => {
+  assert.equal(plain(full(), { keepalive: KA('dancing') }), plain(full()));
+  assert.equal(plain(full(), { keepalive: KA('toString') }), plain(full()));
+});
+
+test('the marker counts for the width and leaves with the cache group', () => {
+  // The line without project and duration is 112 wide (114 with the capsule
+  // edges the plain mode counts): at 115 columns it fits without the marker,
+  // and with " ↻" (116) the cache group has to go.
+  assert.ok(plain(full(), { columns: 115 }).includes('⚡  3:12'));
+  const line = plain(full(), { columns: 115, keepalive: KA('armed') });
+  assert.ok(!line.includes('↻') && !line.includes('⚡'), line);
+});
