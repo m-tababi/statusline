@@ -87,8 +87,8 @@ The plugin draws its part of the hint line under the prompt, left of Claude Code
 ```
 
 - `⚡  m:ss` is the time the main cache entry has left as the keep-alive counts it: from the start of the last main-thread request (or the last ping that refreshed it) plus the TTL, and while Claude Code's own keep-alive touches the entry, from its last touch. Green from 10 minutes, yellow from 3, red below, the time in bold. Before the first answer and after `/clear` (or a compaction or model switch) the time is unknown and nothing is shown. A grey `❄` means the entry has lapsed, or the last ping found it cold.
-- The pill is the switch: `↻ an` armed, `⇡ an` pinging (green), `∅ pausiert` paused, `⏸ aus` off (grey). A click turns the keep-alive off or on for this session and plans or stops the next ping at once. Clicks reach the line in the fullscreen terminal and on the desktop; on the terminal's main screen the pill is drawn but cannot be clicked (use `/keepalive on|off` there).
-- While a clock is drawn the line is redrawn once a second; with no clock there is no tick.
+- The pill is the switch: `↻ an` armed, `⇡ an` pinging (green), `∅ pausiert` paused, `⏸ aus` off (grey). Before the first answer and after `/clear` it shows `↻ an` without a clock. A click turns the keep-alive off or on for this session and plans or stops the next ping at once. Clicks reach the line in the fullscreen terminal and on the desktop; on the terminal's main screen the pill is drawn but cannot be clicked (use `/keepalive on|off` there).
+- While the clock counts down the line is redrawn once a second; with no clock, or once it shows `❄`, there is no tick.
 - On a narrow terminal the pill loses its word first (`↻`, `⏸`), then the plugin's part is left out. The width is estimated from Claude Code's hint text alone: another plugin's pill on the same line is not counted.
 
 Limits:
