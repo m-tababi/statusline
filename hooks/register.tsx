@@ -1,0 +1,313 @@
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
+
+import { forkTtl, mainTtl } from './cache'
+import type { TtlSources } from './cache'
+import {
+  BUILTIN_REFRESH_MS,
+  FORK_PING_PROMPT,
+  FORK_TTL_MUST_MATCH,
+  KEEPALIVE_USAGE,
+  REASON,
+  anchorAfterPing,
+  nextStep,
+  parseBuiltin,
+  parseKeepalive,
+  settlePing,
+  statusFile,
+  statusText,
+} from './keepalive'
+import type { Builtin, Gate, Step } from './keepalive'
+
+const anchor = atom({ plugin: 'statusline', key: 'anchor' } as const, null)
+const isTurnRunning = atom({ plugin: 'statusline', key: 'isTurnRunning' } as const, false)
+const pause = atom({ plugin: 'statusline', key: 'pause' } as const, null)
+const lastPing = atom({ plugin: 'statusline', key: 'lastPing' } as const, null)
+const activityAt = atom({ plugin: 'statusline', key: 'activityAt' } as const, null)
+
+const ENABLED_KEY = 'enabled'
+const TOAST_MS = 8000
+
+// Module values start over on a hot reload, which also cancels the old timers.
+// $ is never stored or bound to a name (the engine refuses that); it is only passed on.
+let isInteractive = false
+let isForking = false
+let ended = false
+let pingTimer: Timer | undefined
+let builtinCache: { at: number; value: Builtin } | undefined
+
+function cancelTimers(): void {
+  pingTimer?.cancel()
+  pingTimer = undefined
+}
+
+// Plan limits appear with the first answer; before it the list says nothing.
+async function planLimits($: EngineInterface): Promise<boolean | undefined> {
+  if ((await read($, anchor)) === null) return undefined
+  try {
+    return (await $.session.usage()).rateLimits.length > 0
+  } catch {
+    return undefined
+  }
+}
+
+async function ttlSources($: EngineInterface): Promise<TtlSources> {
+  let settings: Readonly<Record<string, unknown>> = {}
+  try {
+    settings = await $.settings.read()
+  } catch {
+    // Unreadable settings: the environment and the defaults still decide.
+  }
+  return {
+    force5m: await $.env.get('FORCE_PROMPT_CACHING_5M'),
+    enable1h: await $.env.get('ENABLE_PROMPT_CACHING_1H'),
+    mainEnv: await $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL'),
+    mainSetting: settings.promptCacheTtl,
+    forkEnv: await $.env.get('CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL'),
+    forkSetting: settings.subagentPromptCacheTtl,
+    hasPlanLimits: await planLimits($),
+  }
+}
+
+// Claude Code's global config: $CLAUDE_CONFIG_DIR/.claude.json, else ~/.claude.json.
+async function globalConfigPath($: EngineInterface): Promise<string | null> {
+  const dir = (await $.env.get('CLAUDE_CONFIG_DIR'))?.replace(/\/+$/, '')
+  if (dir !== undefined && dir !== '') return `${dir}/.claude.json`
+  const home = (await $.env.get('HOME'))?.replace(/\/+$/, '')
+  return home !== undefined && home.startsWith('/') ? `${home}/.claude.json` : null
+}
+
+// Claude Code's own keep-alive flag, read at most every BUILTIN_REFRESH_MS. Any failure reads as off.
+async function builtinOf($: EngineInterface): Promise<Builtin> {
+  const now = await $.clock.now()
+  if (builtinCache !== undefined && now - builtinCache.at < BUILTIN_REFRESH_MS) return builtinCache.value
+  let text: string | null = null
+  try {
+    const path = await globalConfigPath($)
+    if (path !== null) text = await $.fs.read(path)
+  } catch {
+    text = null
+  }
+  const value = parseBuiltin(text)
+  builtinCache = { at: now, value }
+  return value
+}
+
+// The switch is global; every check reads it again, so "off" in one session stops the others.
+async function isEnabled($: EngineInterface): Promise<boolean> {
+  try {
+    return (await $.store.get(ENABLED_KEY)) !== false
+  } catch {
+    return true
+  }
+}
+
+async function gateOf($: EngineInterface): Promise<Gate> {
+  const sources = await ttlSources($)
+  return {
+    isEnabled: await isEnabled($),
+    isInteractive,
+    isTurnRunning: await read($, isTurnRunning),
+    isForking,
+    pause: await read($, pause),
+    anchor: await read($, anchor),
+    main: mainTtl(sources),
+    fork: forkTtl(sources),
+    forkTtlMustMatch: FORK_TTL_MUST_MATCH,
+    builtin: await builtinOf($),
+    activityAt: await read($, activityAt),
+  }
+}
+
+async function configDir($: EngineInterface): Promise<string | null> {
+  const dir = (await $.env.get('CLAUDE_CONFIG_DIR'))?.replace(/\/+$/, '')
+  if (dir !== undefined && dir !== '') return dir
+  const home = (await $.env.get('HOME'))?.replace(/\/+$/, '')
+  return home !== undefined && home.startsWith('/') ? `${home}/.claude` : null
+}
+
+// What the status line reads. A failed write only costs the marker.
+async function publish($: EngineInterface, g: Gate, step: Step): Promise<void> {
+  if (!isInteractive) return
+  try {
+    const dir = await configDir($)
+    if (dir === null) return
+    const sessionId = await $.session.id()
+    const body = statusFile(sessionId, g, step, await $.clock.now())
+    await $.fs.write(`${dir}/keepalive/${sessionId}.json`, `${JSON.stringify(body)}\n`)
+  } catch {
+    // The status line then shows no marker.
+  }
+}
+
+// Plans the next ping from the state as it stands, replacing any earlier timer.
+async function arm($: EngineInterface): Promise<void> {
+  const g = await gateOf($)
+  const now = await $.clock.now()
+  const step = nextStep(g, now)
+  if (step.kind === 'late') {
+    await update($, pause, () => REASON.late)
+    return arm($)
+  }
+  // No await from here to the assignment: overlapping arms leave exactly one live timer.
+  pingTimer?.cancel()
+  pingTimer = undefined
+  if (step.kind === 'wait' || step.kind === 'ping') {
+    const delay = step.kind === 'wait' ? step.at - now : 0
+    pingTimer = $.clock.after(delay, () => {
+      void ping($).catch(() => undefined)
+    })
+  }
+  await publish($, g, step)
+}
+
+async function ping($: EngineInterface): Promise<void> {
+  pingTimer = undefined
+  if (isForking || ended) return
+  const g = await gateOf($)
+  const startedAt = await $.clock.now()
+  // Everything is checked again: the switch, a turn, a pause, the built-in window, a late timer.
+  if (nextStep(g, startedAt).kind !== 'ping') return arm($)
+
+  // The lock is claimed with no await since this check: a second timer cannot slip in.
+  if (isForking || ended) return
+  isForking = true
+  await publish($, { ...g, isForking: true }, { kind: 'busy' })
+  // The session may have ended while the status file was written: no fork then.
+  if (ended) {
+    isForking = false
+    return
+  }
+  let outcome: ReturnType<typeof settlePing>
+  try {
+    outcome = settlePing(await $.model.fork({ prompt: FORK_PING_PROMPT }), startedAt)
+  } catch (err) {
+    outcome = { pause: `Ping fehlgeschlagen: ${err instanceof Error ? err.message : String(err)}`, ping: null }
+  } finally {
+    if (!ended) isForking = false
+  }
+  // The session ended while the fork ran: nothing is written afterwards.
+  if (ended) return
+
+  const isRefreshed = outcome.pause === null && outcome.ping !== null
+  await update($, anchor, current => anchorAfterPing(current, startedAt, isRefreshed))
+  if (outcome.ping !== null) {
+    const done = outcome.ping
+    await update($, lastPing, () => done)
+  }
+  if (outcome.pause !== null) {
+    const why = outcome.pause
+    await update($, pause, () => why)
+    $.ui.toast(`Keep-alive pausiert: ${why}`, { timeoutMs: TOAST_MS })
+  }
+  await arm($)
+}
+
+// Pauses the keep-alive until the next real turn.
+async function hold($: EngineInterface, why: string): Promise<void> {
+  await update($, anchor, () => null)
+  await update($, pause, () => why)
+  await arm($)
+}
+
+async function keepaliveCommand($: EngineInterface, args: string): Promise<string> {
+  const verb = parseKeepalive(args)
+  if (verb === null) return KEEPALIVE_USAGE
+  if (verb !== 'status') {
+    await $.store.set(ENABLED_KEY, verb === 'on')
+    await arm($)
+  }
+  const g = await gateOf($)
+  const now = await $.clock.now()
+  const file = statusFile(await $.session.id(), g, nextStep(g, now), now)
+  return statusText(file, g, await read($, lastPing), now)
+}
+
+// A main-thread request that got a response: the new anchor and activity, and the end of any pause.
+async function onMainRequest($: EngineInterface, at: number): Promise<void> {
+  await update($, anchor, old => (old !== null && old.at > at ? old : { at, source: 'turn' as const }))
+  await update($, activityAt, old => Math.max(old ?? 0, at))
+  await update($, pause, () => null)
+}
+
+export const register: Register = on => {
+  // Also raised again on a hot reload: the timer is planned anew from $.state.
+  on('session.start', async ($, e, next) => {
+    const started = await next(e)
+    isInteractive = e.isInteractive
+    ended = false
+    builtinCache = undefined
+    await $.command.register({
+      name: 'keepalive',
+      description: 'Prompt-Cache warm halten: on | off | status',
+      argumentHint: 'on | off | status',
+      immediate: true,
+    })
+    await arm($)
+    return started
+  }).catch(($, e, next) => next(e))
+
+  on('command.run', { command: 'keepalive' }, async ($, e) => ({ text: await keepaliveCommand($, e.args) })).catch(
+    () => ({ text: 'keepalive: Befehl fehlgeschlagen.' }),
+  )
+
+  // turn.start is raised for the main loop only.
+  on('turn.start', async ($, e, next) => {
+    ended = false
+    await update($, isTurnRunning, () => true)
+    await arm($)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('turn.step', async function* ($, e, next) {
+    if (e.agentId !== undefined) return yield* next(e)
+    // A step while a fork runs and no turn does is the fork's own request.
+    if (isForking && !(await read($, isTurnRunning))) return yield* next(e)
+    const at = await $.clock.now()
+    const result = yield* next(e)
+    // The response stands whatever the bookkeeping does.
+    try {
+      if (result.usage !== null) await onMainRequest($, at)
+    } catch {
+      // The next request or turn end plans again.
+    }
+    return result
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const done = await next(e)
+    if (e.agentId == null) {
+      const now = await $.clock.now()
+      await update($, activityAt, old => Math.max(old ?? 0, now))
+      await update($, isTurnRunning, () => false)
+      await arm($)
+    }
+    return done
+  }).catch(($, e, next) => next(e))
+
+  // A compaction that stands leaves the cached prefix behind; precompute installs nothing.
+  on('session.compact', async ($, e, next) => {
+    const done = await next(e)
+    if (e.agentId === undefined && e.trigger !== 'precompute' && done.messages !== undefined) {
+      await hold($, REASON.compacted)
+    }
+    return done
+  }).catch(($, e, next) => next(e))
+
+  on('classic.PostModelSwitch', async ($, e, next) => {
+    await hold($, REASON.modelSwitch)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // /clear ends the conversation without a session.start; the file still names the ending id.
+  // Timers go first and synchronously: the end has a short budget.
+  on('session.end', async ($, e, next) => {
+    // The fork in flight is abandoned: its answer is dropped, and the ending file shows the pause.
+    ended = true
+    isForking = false
+    cancelTimers()
+    await hold($, e.reason === 'clear' ? REASON.cleared : REASON.ended)
+    cancelTimers()
+    return next(e)
+  }).catch(($, e, next) => next(e))
+}

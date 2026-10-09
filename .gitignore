@@ -1,6 +1,9 @@
 # Dependencies (none expected)
 node_modules/
 
+# Editor types and tsconfig the engine writes once the plugin loads
+.claude-plugin/types/
+
 # Coverage and logs
 coverage/
 *.log

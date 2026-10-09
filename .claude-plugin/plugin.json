@@ -1,0 +1,9 @@
+{
+  "name": "statusline",
+  "version": "0.1.0",
+  "author": { "name": "Mohamed Tababi" },
+  "description": "Keeps the prompt cache warm with a tool-less fork shortly before it expires (/keepalive on|off|status) and tells the status line script what it is doing.",
+  "license": "MIT",
+  "keywords": ["prompt-cache", "keepalive", "statusline"],
+  "types": "./types/index.d.ts"
+}

@@ -3,6 +3,7 @@
 // a non-zero exit blanks the line in the host.
 import { getGit } from './lib/git.mjs';
 import { render, FALLBACK } from './lib/render.mjs';
+import { readKeepalive } from './lib/keepalive.mjs';
 
 const DEFAULT_COLUMNS = 120;
 // COLUMNS is the host's full terminal width; the status line is drawn with
@@ -26,11 +27,13 @@ async function main() {
   try {
     const input = JSON.parse(await readStdin());
     const git = await getGit(input?.workspace?.current_dir);
+    const now = Date.now();
     line = render(input, {
       columns: terminalColumns(process.env),
-      now: Date.now(),
+      now,
       git,
       color: !process.env.NO_COLOR,
+      keepalive: readKeepalive(input?.session_id, { now }),
     });
   } catch {
     line = FALLBACK;

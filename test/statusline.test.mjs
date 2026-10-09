@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -9,7 +9,7 @@ const SCRIPT = new URL('../statusline.mjs', import.meta.url).pathname;
 const FULL = readFileSync(new URL('./fixtures/full.json', import.meta.url), 'utf8');
 
 function run(stdin, env = {}) {
-  const base = { PATH: process.env.PATH, TZ: 'UTC', COLUMNS: '204' };
+  const base = { PATH: process.env.PATH, TZ: 'UTC', COLUMNS: '204', CLAUDE_CONFIG_DIR: '/nonexistent/claude-config-for-tests' };
   return spawnSync(process.execPath, [SCRIPT], {
     input: stdin,
     env: { ...base, ...env },
@@ -53,7 +53,7 @@ test('COLUMNS narrows the line (reserved margin applied)', () => {
 
 test('missing or invalid COLUMNS still renders the full-featured default width', () => {
   for (const cols of [undefined, '', 'abc', '0', 'NaN']) {
-    const base = { PATH: process.env.PATH, TZ: 'UTC', NO_COLOR: '1' };
+    const base = { PATH: process.env.PATH, TZ: 'UTC', NO_COLOR: '1', CLAUDE_CONFIG_DIR: '/nonexistent/claude-config-for-tests' };
     if (cols !== undefined) base.COLUMNS = cols;
     const r = spawnSync(process.execPath, [SCRIPT], { input: FULL, env: base, encoding: 'utf8', timeout: 5000 });
     assert.equal(r.status, 0, `cols=${cols}`);
@@ -77,6 +77,41 @@ test('a git that ignores SIGTERM and hangs cannot stall the line (CIFS guarantee
     assert.equal(r.stderr, '');
     assert.ok(r.stdout.length > 0);
     assert.ok(elapsed < 1000, `took ${elapsed} ms`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function withConfigDir(write) {
+  const dir = mkdtempSync(join(tmpdir(), 'kacfg-'));
+  mkdirSync(join(dir, 'keepalive'));
+  write(join(dir, 'keepalive', '00000000-0000-0000-0000-000000000000.json'));
+  return dir;
+}
+
+test('a keep-alive file of this session adds the marker and its expiry', () => {
+  const dir = withConfigDir((path) => writeFileSync(path, JSON.stringify({
+    v: 1, sessionId: '00000000-0000-0000-0000-000000000000', enabled: true, state: 'armed', reason: null,
+    nextPingAt: Date.now() + 60_000, warmUntil: Date.now() + 30 * 60_000, updatedAt: Date.now(),
+  })));
+  try {
+    const r = run(FULL, { NO_COLOR: '1', CLAUDE_CONFIG_DIR: dir });
+    assert.equal(r.status, 0);
+    assert.equal(r.stderr, '');
+    assert.match(r.stdout, /⚡ {2}(29|30):\d\d ↻ {2}│/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a corrupt keep-alive file changes nothing', () => {
+  const plainLine = run(FULL, { NO_COLOR: '1' }).stdout;
+  const dir = withConfigDir((path) => writeFileSync(path, '{"v":1,"sessionId":'));
+  try {
+    const r = run(FULL, { NO_COLOR: '1', CLAUDE_CONFIG_DIR: dir });
+    assert.equal(r.status, 0);
+    assert.equal(r.stderr, '');
+    assert.equal(r.stdout, plainLine);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
