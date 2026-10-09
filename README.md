@@ -60,7 +60,7 @@ A timeout or error drops the dirty dot; if the branch lookup fails, the branch i
 
 The same folder is a Claude Code plugin (`statusline`). It keeps the main conversation's prompt cache warm. Shortly before the cache expires (5 minutes before a 1h entry, after 4 minutes of a 5m one), it sends one tool-less fork of the last request with a one-word prompt. The fork is not in the transcript.
 
-Measured on Claude Code 2.1.295 with Opus 5.5 (2026-10-09): a fork with the default 5m TTL, sent at 4:00 or at 50:00 after the last request, left the 1h main cache warm. A follow-up read came 100 % from the cache, against 24 % and 29 % in the control runs without a fork. No separate fork TTL setting is needed.
+Measured on Claude Code 2.1.295 with Opus 5.5 (2026-10-09), only the first ping of a chain: with a 5m main TTL, a fork at 4:00 refreshed the entry (a follow-up at 7:02 read 100 % from the cache, against 24 % in the control run without a fork). With a 1h main TTL, a fork with the default 5m TTL at 50:00 kept the entry warm (a follow-up at 1h10 read 100 %, against 29 % in the control). A separate fork TTL setting was not needed in this measurement.
 
 Every ping's usage is checked. Each of these pauses the keep-alive until the next real message, after which it turns itself back on:
 
@@ -82,6 +82,8 @@ Limits:
 - A turn that runs or hangs longer than the cache lifetime (for example, a tool waiting for approval) gets no ping, because the plugin never pings during a turn.
 - Without plan limits after the first answer (no subscription) the main TTL is taken as 5m.
 - Overage and Claude Code's own 5m switches are invisible to a plugin; the first ping then finds the cache cold and pauses.
+- A hot reload of the plugin while a ping fork is in flight can send one extra ping, because the lock lives in the module and resets on reload.
+- A fork that never resolves stops the pinging until Claude Code's own request timeout ends it.
 
 The plugin writes `~/.claude/keepalive/<session_id>.json` (or under `CLAUDE_CONFIG_DIR`), which this script reads, without blocking, to draw the marker. A file older than a day is ignored; old files can be removed with:
 
