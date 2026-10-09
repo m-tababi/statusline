@@ -15,7 +15,7 @@ A one-line status line for Claude Code. A plain Node script, no dependencies, no
 | 5h | `5h ━─────── 12% 2h10` | `rate_limits.five_hour` | group omitted |
 | 7d | `7d ━━━───── 34% Mo` (under 24 h left: remaining time instead of the weekday) | `rate_limits.seven_day` | group omitted |
 | Git | `⎇  <branch>[ ●]  <project>` | `git` in `workspace.current_dir`; project = basename of `workspace.project_dir` (falls back to `current_dir`) | project only; branch falls back to `worktree.branch` |
-| Cache | `⚡  m:ss` warm, `❄` cold or expired; a warm cache without `expires_at` shows a bare `⚡` | `prompt_cache.warm`, `prompt_cache.expires_at` | group omitted |
+| Cache | `⚡  m:ss` warm, `❄` cold or expired; a warm cache without `expires_at` shows a bare `⚡`; with colour, `⚡` and the clock turn yellow under 10 minutes left and red under 3 | `prompt_cache.warm`, `prompt_cache.expires_at` | group omitted |
 | Duration | `⏱ 1h12` / `45m` | `cost.total_duration_ms` | group omitted |
 
 Groups are separated by `  │  `. The `●` after the branch marks uncommitted changes to tracked files. Weekday abbreviations are German (`So Mo Di Mi Do Fr Sa`).

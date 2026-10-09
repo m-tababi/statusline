@@ -123,7 +123,8 @@ test('git, cache, duration and reset hint colours', () => {
   const line = colored(full());
   assert.ok(line.includes('\x1b[38;5;75m⎇\x1b[39m  \x1b[1mmaster'), JSON.stringify(line));
   assert.ok(line.includes(' \x1b[38;5;179m●\x1b[39m  \x1b[38;5;245mproj\x1b[39m'), JSON.stringify(line));
-  assert.ok(line.includes('\x1b[38;5;150m⚡\x1b[39m  \x1b[1m3:12'), JSON.stringify(line));
+  // fixture has 192 s left, so the yellow tier applies
+  assert.ok(line.includes('\x1b[38;5;179m⚡\x1b[39m  \x1b[1m\x1b[38;5;179m3:12'), JSON.stringify(line));
   assert.ok(line.includes('\x1b[38;5;245m⏱ 1h12\x1b[39m'), JSON.stringify(line));
   assert.ok(line.includes(' \x1b[38;5;245m2h10\x1b[39m'), JSON.stringify(line));
   const noClock = full();
@@ -177,4 +178,25 @@ test('out-of-range weekly reset prints no bare reset dot', () => {
   assert.ok(line.includes('7d'), line);
   assert.ok(!line.includes('undefined'), line);
   assert.ok(/7d [━─]{8} \d+%\s+│/.test(line), line);
+});
+
+test('warm cache colour follows the time left until expires_at', () => {
+  const cases = [
+    [601, 150, '10:01'], [600, 150, '10:00'], [599, 179, '9:59'],
+    [181, 179, '3:01'], [180, 179, '3:00'], [179, 203, '2:59'],
+  ];
+  for (const [left, code, clock] of cases) {
+    const input = full();
+    input.prompt_cache.expires_at = NOW / 1000 + left;
+    const line = colored(input);
+    const fgc = `\x1b[38;5;${code}m`;
+    assert.ok(line.includes(`${fgc}⚡\x1b[39m  \x1b[1m${code === 150 ? '' : fgc}${clock}`), `${left}s: ${JSON.stringify(line)}`);
+    assert.ok(strip(line).includes(`⚡  ${clock}`), `${left}s clock`);
+  }
+});
+
+test('cache colour is absent without colour', () => {
+  const input = full();
+  input.prompt_cache.expires_at = NOW / 1000 + 100;
+  assert.ok(!plain(input).includes('\x1b'));
 });
