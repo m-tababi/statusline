@@ -13,6 +13,7 @@ import {
   anchorAfterPing,
   clockText,
   clockTone,
+  displayOf,
   hintClock,
   hintOf,
   hintSize,
@@ -20,7 +21,6 @@ import {
   parseBuiltin,
   parseKeepalive,
   settlePing,
-  statusFile,
   statusText,
 } from './keepalive'
 import type { Builtin, Gate, Step } from './keepalive'
@@ -128,27 +128,6 @@ async function gateOf($: EngineInterface): Promise<Gate> {
   }
 }
 
-async function configDir($: EngineInterface): Promise<string | null> {
-  const dir = (await $.env.get('CLAUDE_CONFIG_DIR'))?.replace(/\/+$/, '')
-  if (dir !== undefined && dir !== '') return dir
-  const home = (await $.env.get('HOME'))?.replace(/\/+$/, '')
-  return home !== undefined && home.startsWith('/') ? `${home}/.claude` : null
-}
-
-// What the status line reads. A failed write only costs the marker.
-async function publish($: EngineInterface, g: Gate, step: Step): Promise<void> {
-  if (!isInteractive) return
-  try {
-    const dir = await configDir($)
-    if (dir === null) return
-    const sessionId = await $.session.id()
-    const body = statusFile(sessionId, g, step, await $.clock.now())
-    await $.fs.write(`${dir}/keepalive/${sessionId}.json`, `${JSON.stringify(body)}\n`)
-  } catch {
-    // The status line then shows no marker.
-  }
-}
-
 // Started by the drawing that shows a clock and stopped by the one that does not. The
 // redraw at the clock's end draws the snowflake; the count only ends a tick nobody draws.
 function keepTicking($: EngineInterface, leftMs: number): void {
@@ -160,12 +139,11 @@ function keepTicking($: EngineInterface, leftMs: number): void {
   })
 }
 
-// What the hint line draws, and the status file the status line reads.
+// What the hint line draws; the write redraws it.
 async function show($: EngineInterface, g: Gate, step: Step): Promise<void> {
   if (!isInteractive) return
   const snap = hintOf(g, step, await read($, lastPing))
   await update($, hint, () => snap)
-  await publish($, g, step)
 }
 
 // Plans the next ping from the state as it stands, replacing any earlier timer.
@@ -201,7 +179,7 @@ async function ping($: EngineInterface): Promise<void> {
   if (isForking || ended) return
   isForking = true
   await show($, { ...g, isForking: true }, { kind: 'busy' })
-  // The session may have ended while the hint and the status file were written: no fork then.
+  // The session may have ended while the hint was written: no fork then.
   if (ended) {
     isForking = false
     return
@@ -247,8 +225,7 @@ async function keepaliveCommand($: EngineInterface, args: string): Promise<strin
   }
   const g = await gateOf($)
   const now = await $.clock.now()
-  const file = statusFile(await $.session.id(), g, nextStep(g, now), now)
-  return statusText(file, g, await read($, lastPing), now)
+  return statusText(displayOf(g, nextStep(g, now)), g, await read($, lastPing), now)
 }
 
 // A main-thread request that got a response: the new anchor and activity, and the end of any pause.
@@ -333,10 +310,10 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  // /clear ends the conversation without a session.start; the file still names the ending id.
+  // /clear ends the conversation without a session.start.
   // Timers go first and synchronously: the end has a short budget.
   on('session.end', async ($, e, next) => {
-    // The fork in flight is abandoned: its answer is dropped, and the ending file shows the pause.
+    // The fork in flight is abandoned: its answer is dropped, and the hint line shows the pause.
     ended = true
     isForking = false
     cancelTimers()

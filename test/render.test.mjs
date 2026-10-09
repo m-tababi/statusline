@@ -15,8 +15,20 @@ const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
 test('full fixture renders every group in order', () => {
   assert.equal(
     plain(full()),
-    ['◆ Opus 5.5 high', 'ctx ━━━━━─── 58%', '5h ━─────── 12% 2h10', '7d ━━━───── 34% Mo', '⎇  master ●  proj', '⚡  3:12', '⏱ 1h12'].join('  │  '),
+    ['◆ Opus 5.5 high', 'ctx ━━━━━─── 58%', '5h ━─────── 12% 2h10', '7d ━━━───── 34% Mo', '⎇  master ●  proj', '⏱ 1h12'].join('  │  '),
   );
+});
+
+test('the prompt cache draws nothing: warm, cold, expired or missing', () => {
+  const line = plain(full());
+  for (const cache of [{ warm: false, ttl: '5m', expires_at: null }, { warm: true, ttl: '1h', expires_at: null },
+    { warm: true, ttl: '5m', expires_at: NOW / 1000 - 5 }, undefined]) {
+    const input = full();
+    input.prompt_cache = cache;
+    assert.equal(plain(input), line);
+  }
+  assert.ok(!/[⚡❄]/.test(line), line);
+  assert.ok(!/[⚡❄]/.test(strip(colored(full()))));
 });
 
 test('empty object keeps only the model placeholder', () => {
@@ -51,25 +63,6 @@ test('context used_percentage null (before the first answer) drops the ctx group
   assert.ok(!plain(input).includes('ctx'));
 });
 
-test('cold cache shows a snowflake', () => {
-  const input = full();
-  input.prompt_cache = { warm: false, ttl: '5m', expires_at: null };
-  assert.ok(plain(input).includes('  │  ❄  │  ⏱'));
-});
-
-test('warm cache with expires_at null shows the bolt without a clock', () => {
-  const input = full();
-  input.prompt_cache.expires_at = null;
-  assert.ok(plain(input).includes('proj  │  ⚡  │  ⏱'));
-});
-
-test('warm cache already expired shows a snowflake, never a negative clock', () => {
-  const input = full();
-  input.prompt_cache.expires_at = NOW / 1000 - 5;
-  const line = plain(input);
-  assert.ok(line.includes('  │  ❄  │  ⏱') && !line.includes('-'), line);
-});
-
 test('resets_at in the past drops only the reset hint', () => {
   const input = full();
   input.rate_limits.five_hour.resets_at = NOW / 1000 - 60;
@@ -79,7 +72,6 @@ test('resets_at in the past drops only the reset hint', () => {
 test('resets_at in milliseconds is read like seconds', () => {
   const input = full();
   input.rate_limits.five_hour.resets_at *= 1000;
-  input.prompt_cache.expires_at *= 1000;
   assert.equal(plain(input), plain(full()));
 });
 
@@ -90,7 +82,7 @@ test('7d reset under 24 h shows the remaining time instead of the weekday', () =
 });
 
 test('git null shows only the project; worktree.branch is used when git is null', () => {
-  assert.ok(plain(full(), { git: null }).includes('34% Mo  │  proj  │  ⚡'));
+  assert.ok(plain(full(), { git: null }).includes('34% Mo  │  proj  │  ⏱'));
   const input = full();
   input.worktree = { name: 'wt', branch: 'feature/x' };
   assert.ok(plain(input, { git: null }).includes('⎇  feature/x  proj'));
@@ -108,7 +100,7 @@ test('model capsule, separators and gradient bar carry the exact colour sequence
     + `${RESET}\x1b[38;5;141m▌${RESET}`,
   ), JSON.stringify(line));
   assert.ok(line.includes(`${GRAY}│\x1b[39m`), 'separator in fg 238');
-  assert.equal(line.split(`  ${GRAY}│`).length - 1, 6);
+  assert.equal(line.split(`  ${GRAY}│`).length - 1, 5);
   assert.ok(line.includes('\x1b[38;2;90;200;120m━\x1b[39m'), 'cell 0');
   assert.ok(!line.includes('\x1b[38;2;255;80;120m'), 'cell 7 stays empty at 58%');
   assert.ok(line.includes(`${GRAY}━\x1b[39m`), 'empty cell');
@@ -119,21 +111,12 @@ test('model capsule, separators and gradient bar carry the exact colour sequence
   assert.ok(colored(input).includes('\x1b[38;2;255;80;120m━\x1b[39m'), 'cell 7');
 });
 
-test('git, cache, duration and reset hint colours', () => {
+test('git, duration and reset hint colours', () => {
   const line = colored(full());
   assert.ok(line.includes('\x1b[38;5;75m⎇\x1b[39m  \x1b[1mmaster'), JSON.stringify(line));
   assert.ok(line.includes(' \x1b[38;5;179m●\x1b[39m  \x1b[38;5;245mproj\x1b[39m'), JSON.stringify(line));
-  // fixture has 192 s left, so the yellow tier applies
-  assert.ok(line.includes('\x1b[38;5;179m⚡\x1b[39m  \x1b[1m\x1b[38;5;179m3:12'), JSON.stringify(line));
   assert.ok(line.includes('\x1b[38;5;245m⏱ 1h12\x1b[39m'), JSON.stringify(line));
   assert.ok(line.includes(' \x1b[38;5;245m2h10\x1b[39m'), JSON.stringify(line));
-  const noClock = full();
-  noClock.prompt_cache.expires_at = null;
-  assert.ok(strip(colored(noClock)).includes('proj  │  ⚡  │  ⏱'));
-  assert.ok(colored(noClock).includes('\x1b[38;5;150m⚡\x1b[39m'));
-  const cold = full();
-  cold.prompt_cache.warm = false;
-  assert.ok(colored(cold).includes('\x1b[38;5;110m❄\x1b[39m'));
 });
 
 test('clean git shows no dirty dot; no branch shows only the grey project', () => {
@@ -146,13 +129,18 @@ test('color=false emits no escape sequences', () => {
   assert.ok(!plain(full()).includes('\x1b'));
 });
 
-test('narrow terminals drop duration, project, cache, then reset hints', () => {
+test('narrow terminals drop duration, project, then reset hints', () => {
   const at = (columns) => plain(full(), { columns });
-  assert.ok(at(200).includes('⏱'));
-  const w115 = at(115);
-  assert.ok(!w115.includes('⏱') && !w115.includes(' proj') && w115.includes('⚡'), w115);
-  const w95 = at(95);
-  assert.equal(w95, ['◆ Opus 5.5 high', 'ctx ━━━━━─── 58%', '5h ━─────── 12%', '7d ━━━───── 34%', '⎇  master ●'].join('  │  '));
+  const all = at(200);
+  const noDuration = ['◆ Opus 5.5 high', 'ctx ━━━━━─── 58%', '5h ━─────── 12% 2h10', '7d ━━━───── 34% Mo', '⎇  master ●  proj'].join('  │  ');
+  const noProject = noDuration.slice(0, -'  proj'.length);
+  const noResets = ['◆ Opus 5.5 high', 'ctx ━━━━━─── 58%', '5h ━─────── 12%', '7d ━━━───── 34%', '⎇  master ●'].join('  │  ');
+  // The plain line counts the colour-only capsule edges too.
+  assert.equal(at(visibleWidth(all) + 2), all);
+  assert.equal(at(visibleWidth(all) + 1), noDuration);
+  assert.equal(at(visibleWidth(noDuration) + 1), noProject);
+  assert.equal(at(visibleWidth(noProject) + 1), noResets);
+  assert.equal(at(40), noResets);
 });
 
 test('width fitting ignores ANSI codes: coloured and plain lines drop the same groups', () => {
@@ -178,90 +166,4 @@ test('out-of-range weekly reset prints no bare reset dot', () => {
   assert.ok(line.includes('7d'), line);
   assert.ok(!line.includes('undefined'), line);
   assert.ok(/7d [━─]{8} \d+%\s+│/.test(line), line);
-});
-
-test('warm cache colour follows the time left until expires_at', () => {
-  const cases = [
-    [601, 150, '10:01'], [600, 150, '10:00'], [599, 179, '9:59'],
-    [181, 179, '3:01'], [180, 179, '3:00'], [179, 203, '2:59'],
-  ];
-  for (const [left, code, clock] of cases) {
-    const input = full();
-    input.prompt_cache.expires_at = NOW / 1000 + left;
-    const line = colored(input);
-    const fgc = `\x1b[38;5;${code}m`;
-    assert.ok(line.includes(`${fgc}⚡\x1b[39m  \x1b[1m${code === 150 ? '' : fgc}${clock}`), `${left}s: ${JSON.stringify(line)}`);
-    assert.ok(strip(line).includes(`⚡  ${clock}`), `${left}s clock`);
-  }
-});
-
-test('cache colour is absent without colour', () => {
-  const input = full();
-  input.prompt_cache.expires_at = NOW / 1000 + 100;
-  assert.ok(!plain(input).includes('\x1b'));
-});
-
-const KA = (state, extra = {}) => ({ enabled: state !== 'off', state, warmUntil: null, ...extra });
-
-test('keep-alive marker follows the cache clock', () => {
-  const at = (ka) => plain(full(), { keepalive: ka });
-  assert.ok(at(KA('armed')).includes('  │  ⚡  3:12 ↻  │  ⏱'), at(KA('armed')));
-  assert.ok(at(KA('pinging')).includes('⚡  3:12 ⇡  │'));
-  assert.ok(at(KA('paused')).includes('⚡  3:12 ∅  │'));
-  assert.ok(at(KA('off')).includes('⚡  3:12 off  │'));
-});
-
-test('no keep-alive state leaves the line byte-identical', () => {
-  assert.equal(plain(full(), { keepalive: null }), plain(full()));
-  assert.equal(render(full(), { columns: 200, now: NOW, git: GIT, color: true, keepalive: null }),
-    render(full(), { columns: 200, now: NOW, git: GIT, color: true }));
-});
-
-test("the plugin's verified expiry outlives Claude Code's own", () => {
-  const input = full();
-  input.prompt_cache = { warm: false, ttl: '1h', expires_at: null };
-  const line = plain(input, { keepalive: KA('armed', { warmUntil: NOW + 50 * 60 * 1000 }) });
-  assert.ok(line.includes('⚡  50:00 ↻'), line);
-});
-
-test('the later of the two expiries wins', () => {
-  assert.ok(plain(full(), { keepalive: KA('armed', { warmUntil: NOW + 60 * 1000 }) }).includes('⚡  3:12 ↻'));
-  const noClock = full();
-  noClock.prompt_cache.expires_at = null;
-  assert.ok(plain(noClock, { keepalive: KA('armed', { warmUntil: NOW + 600 * 1000 }) }).includes('⚡  10:00 ↻'));
-});
-
-test('an expired plugin expiry does not warm a cold cache', () => {
-  const input = full();
-  input.prompt_cache = { warm: false, ttl: '1h', expires_at: null };
-  assert.ok(plain(input, { keepalive: KA('armed', { warmUntil: NOW - 1 }) }).includes('  │  ❄ ↻  │  '));
-});
-
-test('without a prompt_cache object there is no cache group and no marker', () => {
-  const input = full();
-  delete input.prompt_cache;
-  const line = plain(input, { keepalive: KA('armed') });
-  assert.ok(!line.includes('↻') && !line.includes('⚡'), line);
-});
-
-test('marker colours: armed green, pinging yellow, paused and off grey', () => {
-  const c = (ka) => render(full(), { columns: 200, now: NOW, git: GIT, color: true, keepalive: ka });
-  assert.ok(c(KA('armed')).includes('\x1b[38;5;150m↻\x1b[39m'));
-  assert.ok(c(KA('pinging')).includes('\x1b[38;5;179m⇡\x1b[39m'));
-  assert.ok(c(KA('paused')).includes('\x1b[38;5;245m∅\x1b[39m'));
-  assert.ok(c(KA('off')).includes('\x1b[38;5;245moff\x1b[39m'));
-});
-
-test('an unknown state draws no marker', () => {
-  assert.equal(plain(full(), { keepalive: KA('dancing') }), plain(full()));
-  assert.equal(plain(full(), { keepalive: KA('toString') }), plain(full()));
-});
-
-test('the marker counts for the width and leaves with the cache group', () => {
-  // The line without project and duration is 112 wide (114 with the capsule
-  // edges the plain mode counts): at 115 columns it fits without the marker,
-  // and with " ↻" (116) the cache group has to go.
-  assert.ok(plain(full(), { columns: 115 }).includes('⚡  3:12'));
-  const line = plain(full(), { columns: 115, keepalive: KA('armed') });
-  assert.ok(!line.includes('↻') && !line.includes('⚡'), line);
 });

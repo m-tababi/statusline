@@ -1,5 +1,5 @@
 // The keep-alive's decisions, free of the engine: when to ping, what a ping's
-// reply means, and what the status line and /keepalive status are told.
+// reply means, and what the hint line and /keepalive status are told.
 import type { ModelForkResult } from 'claude-code'
 
 import type { KeepaliveAnchor, KeepaliveDisplayState, KeepaliveHint, KeepalivePing, KeepaliveTtlChoice } from '../types'
@@ -98,18 +98,6 @@ export type Display = {
   nextPingAt: number | null
 }
 
-// What the status line reads, one file per session (schema v1).
-export type StatusFile = {
-  v: 1
-  sessionId: string
-  enabled: boolean
-  state: DisplayState
-  reason: string | null
-  nextPingAt: number | null
-  warmUntil: number | null
-  updatedAt: number
-}
-
 export const pingDelayMs = (ttlMs: number): number => ttlMs - Math.min(PING_MARGIN_MS, Math.floor(ttlMs * MARGIN_SHARE))
 
 /** Claude Code touches the entry itself only at the subscriber 1h TTL, and only with its flag on. */
@@ -156,22 +144,6 @@ export function displayOf(g: Gate, step: Step): Display {
     state,
     reason: step.kind === 'hold' ? step.reason : step.kind === 'late' ? REASON.late : null,
     nextPingAt: step.kind === 'wait' ? step.at : null,
-  }
-}
-
-export function statusFile(sessionId: string, g: Gate, step: Step, now: number): StatusFile {
-  const { state, reason, nextPingAt } = displayOf(g, step)
-  const isLive = state === 'armed' || state === 'pinging'
-  return {
-    v: 1,
-    sessionId,
-    enabled: g.isEnabled,
-    state,
-    reason,
-    nextPingAt,
-    // Only a verified ping vouches for the entry beyond what Claude Code tracks itself.
-    warmUntil: isLive && g.anchor !== null && g.anchor.source === 'ping' ? g.anchor.at + TTL_MS[g.main.ttl] : null,
-    updatedAt: now,
   }
 }
 
@@ -279,13 +251,13 @@ function builtinLine(g: Gate, now: number): string {
 
 const STATE_WORD: Record<DisplayState, string> = { off: 'aus', armed: 'bereit', pinging: 'pingt gerade', paused: 'pausiert' }
 
-export function statusText(f: StatusFile, g: Gate, last: KeepalivePing | null, now: number): string {
-  const head = f.enabled
-    ? `Keep-alive an (diese Sitzung) · ${STATE_WORD[f.state]}${f.reason === null ? '' : `: ${f.reason}`}`
+export function statusText(d: Display, g: Gate, last: KeepalivePing | null, now: number): string {
+  const head = d.isEnabled
+    ? `Keep-alive an (diese Sitzung) · ${STATE_WORD[d.state]}${d.reason === null ? '' : `: ${d.reason}`}`
     : 'Keep-alive aus (diese Sitzung)'
   const lines = [head, ttlLine(g.main, g.fork), builtinLine(g, now)]
   if (g.anchor !== null) lines.push(`Letzte Anfrage vor ${fmtSpan(now - g.anchor.at)} (${g.anchor.source === 'ping' ? 'Ping' : 'Turn'})`)
-  if (f.nextPingAt !== null) lines.push(`Nächster Ping in ${fmtSpan(f.nextPingAt - now)}`)
+  if (d.nextPingAt !== null) lines.push(`Nächster Ping in ${fmtSpan(d.nextPingAt - now)}`)
   if (last !== null) lines.push(`Letzter Ping vor ${fmtSpan(now - last.at)}: ${usageLine(last.usage)}`)
   return lines.join('\n')
 }

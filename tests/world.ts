@@ -4,10 +4,11 @@ import { mock } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { ModelForkResult, On, TurnUsage } from 'claude-code'
 
+import type { KeepaliveHint, KeepalivePing } from '../types'
+
 export const START = Date.UTC(2026, 9, 9, 12, 0, 0)
 export const MIN = 60_000
 export const HOME = '/home/tester'
-export const SESSION = 's1'
 
 export const WARM: TurnUsage = {
   model: 'claude-opus-5-5', input_tokens: 3, output_tokens: 2, cache_read_input_tokens: 40_000, cache_creation_input_tokens: 120,
@@ -47,8 +48,8 @@ export function world(on: On, o: WorldOptions = {}) {
     stepUsage: WARM as TurnUsage,
     logs: [] as string[],
     toasts: [] as string[],
+    // What $.fs.write was handed, by path.
     files: new Map<string, string>(),
-    afterWrite: undefined as (() => Promise<void>) | undefined,
     // Files $.fs.read finds (by absolute path); anything else does not exist.
     readable: new Map<string, string>(),
     submits: [] as string[],
@@ -81,7 +82,6 @@ export function world(on: On, o: WorldOptions = {}) {
     if (text === undefined) throw new Error(`ENOENT ${e.path}`)
     return { value: text }
   })
-  on('session.id', () => ({ value: SESSION }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('model.fork', async ($, e) => {
@@ -99,7 +99,6 @@ export function world(on: On, o: WorldOptions = {}) {
   })
   on('fs.write', async ($, e) => {
     seen.files.set(e.path, e.text)
-    await seen.afterWrite?.()
     return { value: undefined }
   })
   on('prompt.submit', ($, e) => {
@@ -173,4 +172,22 @@ export async function command($: Engine, name: string, args: string): Promise<st
     presentation: { isFullscreen: false, columns: 120 },
   })
   return ran.text ?? ''
+}
+
+// A second plugin that reads the keep-alive's session values (any plugin may),
+// answering /peek; the kit answers $.state beneath the plugins, out of a test hook's sight.
+export const PEEK = {
+  name: 'peek',
+  register(on: On) {
+    on('command.run', { command: 'peek' }, async $ => ({
+      text: JSON.stringify({
+        hint: (await $.state.get({ plugin: 'statusline', key: 'hint' })).value ?? null,
+        lastPing: (await $.state.get({ plugin: 'statusline', key: 'lastPing' })).value ?? null,
+      }),
+    }))
+  },
+}
+
+export async function peek($: Engine): Promise<{ hint: KeepaliveHint | null; lastPing: KeepalivePing | null }> {
+  return JSON.parse(await command($, 'peek', '')) as { hint: KeepaliveHint | null; lastPing: KeepalivePing | null }
 }
