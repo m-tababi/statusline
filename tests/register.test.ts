@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { ModelForkResult } from 'claude-code'
 
-import { FORK_PING_PROMPT, KEEPALIVE_USAGE, REASON } from '../hooks/keepalive'
-import { COLD, HOME, MIN, START, ZERO, command, complete, forkReply, start, stepOnly, turn, world } from './world'
+import { FORK_PING_PROMPT, KEEPALIVE_USAGE, PILL, REASON } from '../hooks/keepalive'
+import {
+  COLD, ENGINE_LINE, HINT, HOME, MIN, START, ZERO, command, complete, forkReply, hintLine, start, stepOnly, turn, world,
+} from './world'
 
 const FILE = `${HOME}/.claude/keepalive/s1.json`
 const status = (seen: ReturnType<typeof world>) => JSON.parse(seen.files.get(FILE) ?? 'null') as Record<string, unknown> | null
@@ -231,7 +233,7 @@ describe('/keepalive', () => {
     await turn($, 't1')
     await seen.clock.advance(5 * MIN)
     expect((await command($, 'keepalive', '')).split('\n')).toEqual([
-      'Keep-alive an · bereit',
+      'Keep-alive an (diese Sitzung) · bereit',
       'TTL Hauptverlauf 1h (default (subscription)) · Fork 5m (default)',
       'Eingebauter Keep-alive (tengu_sequential_cloud): nicht lesbar, gilt als aus',
       'Letzte Anfrage vor 5:00 (Turn)',
@@ -240,36 +242,223 @@ describe('/keepalive', () => {
     expect(await command($, 'keepalive', 'maybe')).toBe(KEEPALIVE_USAGE)
   })
 
-  test('off stops pings, persists into a new session; on turns them back on', async ($, on) => {
+  test('off stops pings for this session and survives a hot reload; on plans again', async ($, on) => {
     const seen = world(on)
     await start($)
     await turn($, 't1')
-    expect((await command($, 'keepalive', 'off')).split('\n')[0]).toBe('Keep-alive aus')
-    expect(seen.stored.get('enabled')).toBe(false)
+    expect((await command($, 'keepalive', 'off')).split('\n')[0]).toBe('Keep-alive aus (diese Sitzung)')
+    expect(seen.stored.has('enabled')).toBe(false)
     expect(status(seen)).toMatchObject({ enabled: false, state: 'off' })
     await seen.clock.advance(3 * 60 * MIN)
     expect(seen.forks).toEqual([])
 
+    // A hot reload raises session.start again: the switch stays off.
     await start($)
     await turn($, 't2')
     await seen.clock.advance(60 * MIN)
     expect(seen.forks).toEqual([])
 
-    await command($, 'keepalive', 'on')
-    expect(seen.stored.get('enabled')).toBe(true)
+    expect((await command($, 'keepalive', 'on')).split('\n')[0]).toMatch(/^Keep-alive an \(diese Sitzung\) · /)
+    expect(seen.stored.has('enabled')).toBe(false)
     await turn($, 't3')
     await seen.clock.advance(55 * MIN)
     expect(seen.forks).toHaveLength(1)
   })
 
-  test('off written by another session stops this one at its next due time', async ($, on) => {
+  test('every session starts on: a stored global "off" is ignored', async ($, on) => {
+    const seen = world(on, { store: { enabled: false } })
+    await start($)
+    await turn($, 't1')
+    await seen.clock.advance(55 * MIN)
+    expect(seen.forks).toHaveLength(1)
+  })
+
+  test('/clear starts the next session switched on', async ($, on) => {
     const seen = world(on)
     await start($)
     await turn($, 't1')
-    seen.stored.set('enabled', false)
+    await command($, 'keepalive', 'off')
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+    await turn($, 't2')
     await seen.clock.advance(55 * MIN)
+    expect(seen.forks).toHaveLength(1)
+  })
+})
+
+describe('hint line', () => {
+  const texts = async (ui: Awaited<ReturnType<typeof hintLine>>) => (await ui.findAll({ type: 'Text' })).map(t => t.text)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`draws the clock and the switch before the engine line (${surface})`, async ($, on) => {
+      const seen = world(on)
+      await start($)
+      await turn($, 't1')
+      await seen.clock.advance(5 * MIN + 50_000)
+      const ui = await hintLine($, { surface })
+
+      const drawn = (await ui.drawn()) as { type: string; props: unknown; children: unknown[] }
+      expect(drawn).toMatchObject({ type: 'Box', props: { flexDirection: 'row', columnGap: 2 } })
+      expect(drawn.children).toHaveLength(2)
+      expect(drawn.children[1]).toEqual(ENGINE_LINE)
+      expect(await ui.find({ type: 'Text', text: '⚡  54:10' })).toMatchObject({ props: { color: 'success', bold: true } })
+      expect(await ui.find({ type: 'Button', key: 'keepalive' })).toMatchObject({ props: { plain: true } })
+      expect(await ui.find({ type: 'Text', text: PILL.armed.long })).toMatchObject({
+        props: { backgroundColor: 'success', color: 'inverseText' },
+      })
+      expect(await texts(ui)).toEqual(['⚡  54:10', PILL.armed.long])
+    })
+  }
+
+  test('the clock ticks every second while it shows, in green, yellow and red', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    await turn($, 't1')
+    await command($, 'keepalive', 'off')
+    await seen.clock.advance(50 * MIN)
+    const ui = await hintLine($)
+    const clock = async () => (await ui.find({ type: 'Text', text: /⚡/ }))?.props.color
+    expect(await ui.find({ type: 'Text', text: '⚡  10:00' })).toBeDefined()
+    expect(await clock()).toBe('success')
+    await seen.clock.advance(1000)
+    expect(await ui.find({ type: 'Text', text: '⚡  9:59' })).toBeDefined()
+    expect(await clock()).toBe('warning')
+    await seen.clock.advance(7 * MIN - 1000)
+    expect(await ui.find({ type: 'Text', text: '⚡  3:00' })).toBeDefined()
+    expect(await clock()).toBe('warning')
+    await seen.clock.advance(1000)
+    expect(await ui.find({ type: 'Text', text: '⚡  2:59' })).toBeDefined()
+    expect(await clock()).toBe('error')
+    expect(await ui.find({ type: 'Text', text: PILL.off.long })).toMatchObject({ props: { backgroundColor: 'inactive' } })
+  })
+
+  test('a lapsed entry shows a grey snowflake and the tick stops', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    await turn($, 't1')
+    await command($, 'keepalive', 'off')
+    await seen.clock.advance(60 * MIN - 10_000)
+    const ui = await hintLine($)
+    expect(await ui.find({ type: 'Text', text: '⚡  0:10' })).toBeDefined()
+    await seen.clock.advance(10_000)
+    expect(await ui.find({ type: 'Text', text: '❄' })).toMatchObject({ props: { color: 'inactive' } })
+    expect(await ui.find({ type: 'Text', text: /⚡/ })).toBeUndefined()
+    const ticks = seen.invalidates
+    await seen.clock.advance(10_000)
+    expect(seen.invalidates).toBe(ticks)
+  })
+
+  test('no clock and no tick before the first answer', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    const ui = await hintLine($)
+    expect(await texts(ui)).toEqual([PILL.paused.long])
+    const ticks = seen.invalidates
+    await seen.clock.advance(10_000)
+    expect(seen.invalidates).toBe(ticks)
+
+    await turn($, 't1')
+    await seen.clock.advance(3000)
+    expect(seen.invalidates).toBeGreaterThanOrEqual(ticks + 3)
+    expect(await texts(ui)).toEqual(['⚡  59:57', PILL.armed.long])
+  })
+
+  test('no clock after /clear', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    await turn($, 't1')
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+    const ui = await hintLine($)
+    expect(await texts(ui)).toEqual([PILL.paused.long])
+    const ticks = seen.invalidates
+    await seen.clock.advance(10_000)
+    expect(seen.invalidates).toBe(ticks)
+  })
+
+  test('a cold ping shows the snowflake at once, paused', async ($, on) => {
+    const seen = world(on)
+    seen.forkReplies.push(forkReply(COLD))
+    await start($)
+    await turn($, 't1')
+    await seen.clock.advance(55 * MIN)
+    const ui = await hintLine($)
+    expect(await texts(ui)).toEqual(['❄', PILL.paused.long])
+  })
+
+  test('a ping in flight shows ⇡, then the new entry', async ($, on) => {
+    const seen = world(on)
+    let release: (value: ModelForkResult) => void = () => undefined
+    seen.forkReplies.push(() => new Promise<ModelForkResult>(resolve => (release = resolve)))
+    await start($)
+    await turn($, 't1')
+    await seen.clock.advance(55 * MIN)
+    const ui = await hintLine($)
+    expect(await texts(ui)).toEqual(['⚡  5:00', PILL.pinging.long])
+    release(forkReply())
+    await seen.clock.settle()
+    expect(await texts(ui)).toEqual(['⚡  60:00', PILL.armed.long])
+  })
+
+  test('pressing the switch turns the keep-alive off and on for this session', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    await turn($, 't1')
+    await seen.clock.advance(54 * MIN)
+    const ui = await hintLine($)
+    await ui.press({ key: 'keepalive' })
+    expect(await ui.find({ type: 'Text', text: PILL.off.long })).toBeDefined()
+    expect((await command($, 'keepalive', 'status')).split('\n')[0]).toBe('Keep-alive aus (diese Sitzung)')
+    // The ping was due at 55:00.
+    await seen.clock.advance(2 * MIN)
     expect(seen.forks).toEqual([])
-    expect(status(seen)).toMatchObject({ state: 'off' })
+
+    // Back on at 56:00: the ping is due at once, planned by the press.
+    await ui.press({ key: 'keepalive' })
+    await seen.clock.settle()
+    expect(seen.forks).toEqual([FORK_PING_PROMPT])
+    expect(await texts(ui)).toEqual(['⚡  60:00', PILL.armed.long])
+  })
+
+  test('the main screen draws the text without a button', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    await turn($, 't1')
+    const ui = await hintLine($, { isFullscreen: false })
+    expect(await texts(ui)).toEqual(['⚡  60:00', PILL.armed.long])
+    expect(await ui.find({ type: 'Button' })).toBeUndefined()
+    await seen.clock.advance(1000)
+    expect(await texts(ui)).toEqual(['⚡  59:59', PILL.armed.long])
+  })
+
+  test('narrows the switch to its glyph, then leaves only the engine line', async ($, on) => {
+    world(on)
+    await start($)
+    await turn($, 't1')
+    // room = columns - hint - 8; the clock "⚡  60:00" and its gap take 11, the long pill 8, the short one 5.
+    const room = (n: number) => HINT.length + 8 + n
+    const long = await hintLine($, { columns: room(19) })
+    expect(await texts(long)).toEqual(['⚡  60:00', PILL.armed.long])
+    await long.unmount()
+    const short = await hintLine($, { columns: room(18) })
+    expect(await texts(short)).toEqual(['⚡  60:00', PILL.armed.short])
+    await short.unmount()
+    const none = await hintLine($, { columns: room(15) })
+    expect(await none.drawn()).toEqual(ENGINE_LINE)
+  })
+
+  test('a desktop that has not measured gets the long pill', async ($, on) => {
+    world(on)
+    await start($)
+    await turn($, 't1')
+    const ui = await hintLine($, { surface: 'desktop', hasViewport: false })
+    expect(await texts(ui)).toEqual(['⚡  60:00', PILL.armed.long])
+  })
+
+  test('a non-interactive session draws only the engine line', async ($, on) => {
+    world(on)
+    await start($, false)
+    await turn($, 't1')
+    const ui = await hintLine($)
+    expect(await ui.drawn()).toEqual(ENGINE_LINE)
   })
 })
 

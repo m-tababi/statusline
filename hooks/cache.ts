@@ -82,6 +82,12 @@ export function fmtSpan(ms: number): string {
   return h > 0 ? `${h}h${String(m).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`
 }
 
+/** "54:10": minutes and seconds, minutes unbounded ("60:00"); a negative span reads 0:00. */
+export function fmtClock(ms: number): string {
+  const total = Math.floor(Math.max(0, ms) / 1000)
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
+}
+
 export function usageLine(u: KeepaliveUsage): string {
   const total = promptTokens(u)
   const share = total === 0 ? 0 : Math.round((u.cache_read_input_tokens / total) * 100)

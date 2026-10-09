@@ -8,8 +8,14 @@ import {
   FORK_PING_PROMPT,
   FORK_TTL_MUST_MATCH,
   KEEPALIVE_USAGE,
+  PILL,
   REASON,
   anchorAfterPing,
+  clockText,
+  clockTone,
+  hintClock,
+  hintOf,
+  hintSize,
   nextStep,
   parseBuiltin,
   parseKeepalive,
@@ -24,9 +30,12 @@ const isTurnRunning = atom({ plugin: 'statusline', key: 'isTurnRunning' } as con
 const pause = atom({ plugin: 'statusline', key: 'pause' } as const, null)
 const lastPing = atom({ plugin: 'statusline', key: 'lastPing' } as const, null)
 const activityAt = atom({ plugin: 'statusline', key: 'activityAt' } as const, null)
+// Every session starts on; a hot reload keeps what the person chose.
+const isEnabled = atom({ plugin: 'statusline', key: 'isEnabled' } as const, true)
+const hint = atom({ plugin: 'statusline', key: 'hint' } as const, null)
 
-const ENABLED_KEY = 'enabled'
 const TOAST_MS = 8000
+const TICK_MS = 1000
 
 // Module values start over on a hot reload, which also cancels the old timers.
 // $ is never stored or bound to a name (the engine refuses that); it is only passed on.
@@ -34,11 +43,20 @@ let isInteractive = false
 let isForking = false
 let ended = false
 let pingTimer: Timer | undefined
+// Redraws the hint line every second while it shows a clock, and at most until that clock runs out.
+let ticker: Timer | undefined
+let ticksLeft = 0
 let builtinCache: { at: number; value: Builtin } | undefined
+
+function stopTicker(): void {
+  ticker?.cancel()
+  ticker = undefined
+}
 
 function cancelTimers(): void {
   pingTimer?.cancel()
   pingTimer = undefined
+  stopTicker()
 }
 
 // Plan limits appear with the first answer; before it the list says nothing.
@@ -93,19 +111,10 @@ async function builtinOf($: EngineInterface): Promise<Builtin> {
   return value
 }
 
-// The switch is global; every check reads it again, so "off" in one session stops the others.
-async function isEnabled($: EngineInterface): Promise<boolean> {
-  try {
-    return (await $.store.get(ENABLED_KEY)) !== false
-  } catch {
-    return true
-  }
-}
-
 async function gateOf($: EngineInterface): Promise<Gate> {
   const sources = await ttlSources($)
   return {
-    isEnabled: await isEnabled($),
+    isEnabled: await read($, isEnabled),
     isInteractive,
     isTurnRunning: await read($, isTurnRunning),
     isForking,
@@ -140,6 +149,25 @@ async function publish($: EngineInterface, g: Gate, step: Step): Promise<void> {
   }
 }
 
+// Started by the drawing that shows a clock and stopped by the one that does not. The
+// redraw at the clock's end draws the snowflake; the count only ends a tick nobody draws.
+function keepTicking($: EngineInterface, leftMs: number): void {
+  ticksLeft = Math.ceil(leftMs / TICK_MS)
+  ticker ??= $.clock.every(TICK_MS, () => {
+    ticksLeft -= 1
+    if (ticksLeft < 0) stopTicker()
+    $.ui.invalidate('ui.render')
+  })
+}
+
+// What the hint line draws, and the status file the status line reads.
+async function show($: EngineInterface, g: Gate, step: Step): Promise<void> {
+  if (!isInteractive) return
+  const snap = hintOf(g, step, await read($, lastPing))
+  await update($, hint, () => snap)
+  await publish($, g, step)
+}
+
 // Plans the next ping from the state as it stands, replacing any earlier timer.
 async function arm($: EngineInterface): Promise<void> {
   const g = await gateOf($)
@@ -158,7 +186,7 @@ async function arm($: EngineInterface): Promise<void> {
       void ping($).catch(() => undefined)
     })
   }
-  await publish($, g, step)
+  await show($, g, step)
 }
 
 async function ping($: EngineInterface): Promise<void> {
@@ -172,8 +200,8 @@ async function ping($: EngineInterface): Promise<void> {
   // The lock is claimed with no await since this check: a second timer cannot slip in.
   if (isForking || ended) return
   isForking = true
-  await publish($, { ...g, isForking: true }, { kind: 'busy' })
-  // The session may have ended while the status file was written: no fork then.
+  await show($, { ...g, isForking: true }, { kind: 'busy' })
+  // The session may have ended while the hint and the status file were written: no fork then.
   if (ended) {
     isForking = false
     return
@@ -214,7 +242,7 @@ async function keepaliveCommand($: EngineInterface, args: string): Promise<strin
   const verb = parseKeepalive(args)
   if (verb === null) return KEEPALIVE_USAGE
   if (verb !== 'status') {
-    await $.store.set(ENABLED_KEY, verb === 'on')
+    await update($, isEnabled, () => verb === 'on')
     await arm($)
   }
   const g = await gateOf($)
@@ -228,6 +256,12 @@ async function onMainRequest($: EngineInterface, at: number): Promise<void> {
   await update($, anchor, old => (old !== null && old.at > at ? old : { at, source: 'turn' as const }))
   await update($, activityAt, old => Math.max(old ?? 0, at))
   await update($, pause, () => null)
+}
+
+// The hint line's switch: off and on for this session.
+async function toggle($: EngineInterface): Promise<void> {
+  await update($, isEnabled, on => !on)
+  await arm($)
 }
 
 export const register: Register = on => {
@@ -306,8 +340,61 @@ export const register: Register = on => {
     ended = true
     isForking = false
     cancelTimers()
+    // The conversation after a /clear is a new session: it starts switched on.
+    if (e.reason === 'clear') await update($, isEnabled, () => true)
     await hold($, e.reason === 'clear' ? REASON.cleared : REASON.ended)
     cancelTimers()
     return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // The cache clock and the switch, left of the engine's hint line and whatever
+  // other plugins drew there (embedded whole). The terminal's main screen takes
+  // no clicks on this line: the switch is drawn as text there.
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    const below = await next(e)
+    const snap = await read($, hint)
+    const clock = snap === null ? null : hintClock(snap, await $.clock.now())
+    const size = snap === null ? null : hintSize(e.viewport?.columns, e.props.hint, clock, snap.state)
+    if (size !== null && clock?.kind === 'warm') keepTicking($, clock.leftMs)
+    else stopTicker()
+    if (snap === null || size === null) return below
+
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const isOn = snap.state === 'armed' || snap.state === 'pinging'
+    const label = (
+      <Text backgroundColor={isOn ? 'success' : 'inactive'} color="inverseText" bold={isOn}>
+        {PILL[snap.state][size]}
+      </Text>
+    )
+    const pill =
+      e.viewport?.isFullscreen === false ? (
+        label
+      ) : (
+        <Button key="keepalive" plain onPress={() => void toggle($).catch(() => undefined)}>
+          {label}
+        </Button>
+      )
+    const mine =
+      clock === null ? (
+        <Box flexShrink={0}>{pill}</Box>
+      ) : (
+        <Box flexShrink={0} flexDirection="row" columnGap={2}>
+          {clock.kind === 'warm' ? (
+            <Text color={clockTone(clock.leftMs)} bold>
+              {clockText(clock.leftMs)}
+            </Text>
+          ) : (
+            <Text color="inactive">❄</Text>
+          )}
+          {pill}
+        </Box>
+      )
+
+    return (
+      <Box flexDirection="row" columnGap={2}>
+        {mine}
+        {below}
+      </Box>
+    )
   }).catch(($, e, next) => next(e))
 }

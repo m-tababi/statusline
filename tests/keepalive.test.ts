@@ -1,10 +1,11 @@
 import { expect, test } from 'claude-code/testing'
 
 import {
-  BUILTIN_OFF, REASON, anchorAfterPing, coveredAnchor, nextStep, parseBuiltin, parseKeepalive, pingDelayMs, settlePing,
-  statusFile, statusText,
+  BUILTIN_OFF, HINT_MARGIN, PILL, REASON, anchorAfterPing, clockTone, coveredAnchor, displayOf, hintClock, hintOf, hintSize,
+  nextStep, parseBuiltin, parseKeepalive, pingDelayMs, settlePing, statusFile, statusText,
 } from '../hooks/keepalive'
 import type { Gate } from '../hooks/keepalive'
+import type { KeepaliveHint } from '../types'
 
 const T0 = 10_000_000
 const MIN = 60_000
@@ -127,7 +128,7 @@ test('status text', () => {
   const now = T0 + 5 * MIN
   const armed = statusText(statusFile('s1', g, { kind: 'wait', at: T0 + 55 * MIN }, now), g, null, now)
   expect(armed.split('\n')).toEqual([
-    'Keep-alive an · bereit',
+    'Keep-alive an (diese Sitzung) · bereit',
     'TTL Hauptverlauf 1h (default (subscription)) · Fork 5m (default)',
     'Eingebauter Keep-alive (tengu_sequential_cloud): aus',
     'Letzte Anfrage vor 5:00 (Turn)',
@@ -135,7 +136,7 @@ test('status text', () => {
   ])
   const last = { at: T0, usage: WARM, isWarm: true }
   const paused = statusText(statusFile('s1', g, { kind: 'hold', reason: 'r' }, now), g, last, now)
-  expect(paused).toContain('Keep-alive an · pausiert: r')
+  expect(paused).toContain('Keep-alive an (diese Sitzung) · pausiert: r')
   expect(paused).toContain('Letzter Ping vor 5:00: read 40.0k · write 120 · input 3 · aus Cache 100 % → warm')
   const lineOf = (o: Partial<Gate>) => statusText(statusFile('s1', gate(o), { kind: 'busy' }, now), gate(o), null, now).split('\n')[2]
   expect(lineOf({ builtin: ON })).toBe('Eingebauter Keep-alive (tengu_sequential_cloud): an, deckt noch 55:00')
@@ -145,5 +146,77 @@ test('status text', () => {
   )
   expect(lineOf({ builtin: { ...ON, state: 'unreadable' } })).toBe('Eingebauter Keep-alive (tengu_sequential_cloud): nicht lesbar, gilt als aus')
   const off = gate({ isEnabled: false })
-  expect(statusText(statusFile('s1', off, { kind: 'off' }, now), off, null, now).split('\n')[0]).toBe('Keep-alive aus')
+  expect(statusText(statusFile('s1', off, { kind: 'off' }, now), off, null, now).split('\n')[0]).toBe('Keep-alive aus (diese Sitzung)')
+})
+
+test('display state: off, armed, pinging, paused', () => {
+  expect(displayOf(gate(), { kind: 'wait', at: T0 + 55 * MIN })).toEqual({
+    isEnabled: true, state: 'armed', reason: null, nextPingAt: T0 + 55 * MIN,
+  })
+  expect(displayOf(gate({ isTurnRunning: true }), { kind: 'busy' })).toMatchObject({ state: 'armed', nextPingAt: null })
+  expect(displayOf(gate({ isForking: true }), { kind: 'busy' }).state).toBe('pinging')
+  expect(displayOf(gate(), { kind: 'hold', reason: 'r' })).toMatchObject({ state: 'paused', reason: 'r' })
+  expect(displayOf(gate(), { kind: 'late' })).toMatchObject({ state: 'paused', reason: REASON.late })
+  expect(displayOf(gate({ isEnabled: false }), { kind: 'off' })).toEqual({ isEnabled: false, state: 'off', reason: null, nextPingAt: null })
+})
+
+const hint = (o: Partial<KeepaliveHint> = {}): KeepaliveHint => ({
+  state: 'armed', anchorAt: T0, isCold: false, ttlMs: 60 * MIN, builtin: null, activityAt: T0, ...o,
+})
+
+test('hint snapshot: anchor, TTL, the active built-in keep-alive, a cold last ping', () => {
+  expect(hintOf(gate(), { kind: 'wait', at: T0 + 55 * MIN }, null)).toEqual(hint())
+  expect(hintOf(gate({ anchor: null }), { kind: 'hold', reason: REASON.noAnchor }, null)).toEqual(hint({ state: 'paused', anchorAt: null }))
+  expect(hintOf(gate({ main: { ttl: '5m', source: 'x' } }), { kind: 'busy' }, null).ttlMs).toBe(5 * MIN)
+  expect(hintOf(gate({ builtin: ON }), { kind: 'busy' }, null).builtin).toEqual({ windowMs: 60 * MIN, touchMs: 30_000 })
+  // Not active at a TTL set by environment or settings.
+  expect(hintOf(gate({ builtin: ON, main: { ttl: '1h', source: 'promptCacheTtl' } }), { kind: 'busy' }, null).builtin).toBe(null)
+  const cold = { at: T0 + 55 * MIN, usage: COLD, isWarm: false }
+  expect(hintOf(gate(), { kind: 'hold', reason: 'r' }, cold).isCold).toBe(true)
+  // A request after the cold ping refreshed the entry; a warm ping says nothing against it.
+  expect(hintOf(gate({ anchor: { at: T0 + 56 * MIN, source: 'turn' } }), { kind: 'busy' }, cold).isCold).toBe(false)
+  expect(hintOf(gate(), { kind: 'busy' }, { ...cold, isWarm: true }).isCold).toBe(false)
+})
+
+test('hint clock: unknown without an anchor, the time left, cold once it ran out or a ping found it cold', () => {
+  expect(hintClock(hint({ anchorAt: null }), T0)).toBe(null)
+  expect(hintClock(hint(), T0)).toEqual({ kind: 'warm', leftMs: 60 * MIN })
+  expect(hintClock(hint(), T0 + 5 * MIN + 50_000)).toEqual({ kind: 'warm', leftMs: 54 * MIN + 10_000 })
+  expect(hintClock(hint(), T0 + 60 * MIN - 1)).toEqual({ kind: 'warm', leftMs: 1 })
+  expect(hintClock(hint(), T0 + 60 * MIN)).toEqual({ kind: 'cold' })
+  expect(hintClock(hint({ isCold: true }), T0 + MIN)).toEqual({ kind: 'cold' })
+  // While Claude Code's own keep-alive touches the entry, it counts from the last touch.
+  const builtin = hint({ builtin: { windowMs: 60 * MIN, touchMs: 30_000 } })
+  expect(hintClock(builtin, T0 + 30 * MIN)).toEqual({ kind: 'warm', leftMs: 60 * MIN - 30_000 })
+  expect(hintClock(builtin, T0 + 100 * MIN)).toEqual({ kind: 'warm', leftMs: 20 * MIN - 30_000 })
+})
+
+test('clock colour: green from 10 minutes, yellow from 3, red below', () => {
+  expect(clockTone(600_000)).toBe('success')
+  expect(clockTone(599_999)).toBe('warning')
+  expect(clockTone(180_000)).toBe('warning')
+  expect(clockTone(179_999)).toBe('error')
+})
+
+test('pill texts', () => {
+  expect(PILL).toEqual({
+    armed: { long: ' ↻ an ', short: ' ↻ ' },
+    pinging: { long: ' ⇡ an ', short: ' ⇡ ' },
+    paused: { long: ' ∅ pausiert ', short: ' ∅ ' },
+    off: { long: ' ⏸ aus ', short: ' ⏸ ' },
+  })
+})
+
+test('hint size: the long pill, then the short one, then nothing', () => {
+  const warm = { kind: 'warm' as const, leftMs: 54 * MIN + 10_000 }
+  // "⚡  54:10" is 9 columns (the bolt counts 2), then 2, then " ↻ an " (6), then 2 before the line below.
+  const base = 'abc'.length + HINT_MARGIN
+  expect(hintSize(base + 19, 'abc', warm, 'armed')).toBe('long')
+  expect(hintSize(base + 18, 'abc', warm, 'armed')).toBe('short')
+  expect(hintSize(base + 16, 'abc', warm, 'armed')).toBe('short')
+  expect(hintSize(base + 15, 'abc', warm, 'armed')).toBe(null)
+  expect(hintSize(base + 8, 'abc', null, 'armed')).toBe('long')
+  expect(hintSize(base + 7, 'abc', null, 'armed')).toBe('short')
+  expect(hintSize(base + 3 + 9, 'abc', { kind: 'cold' }, 'off')).toBe('long')
+  expect(hintSize(undefined, 'abc', warm, 'paused')).toBe('long')
 })

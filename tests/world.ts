@@ -52,6 +52,8 @@ export function world(on: On, o: WorldOptions = {}) {
     // Files $.fs.read finds (by absolute path); anything else does not exist.
     readable: new Map<string, string>(),
     submits: [] as string[],
+    // How often the plugin asked for a redraw.
+    invalidates: 0,
   }
 
   on('store.get', ($, e) => ({ value: seen.stored.get(e.key) }))
@@ -115,8 +117,33 @@ export function world(on: On, o: WorldOptions = {}) {
   on('session.compact', ($, e) => ({ messages: e.messages }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('classic.PostModelSwitch', () => ({}))
+  on('ui.invalidate', ($, e, next) => {
+    seen.invalidates += 1
+    return next(e)
+  })
+  // The engine's own hint line: a node core draws itself.
+  on('ui.render', { component: 'PromptHint' }, () => ENGINE_LINE as never)
 
   return seen
+}
+
+export const ENGINE_LINE = { type: 'engine', ref: 0 }
+export const HINT = '? for shortcuts'
+
+/** The hint line in the fullscreen terminal unless told otherwise. */
+export function hintLine(
+  $: Engine,
+  o: { surface?: 'terminal' | 'desktop'; columns?: number; isFullscreen?: boolean; hasViewport?: boolean } = {},
+) {
+  return $.ui.mount({
+    plugin: 'statusline',
+    surface: o.surface ?? 'terminal',
+    component: 'PromptHint',
+    props: { isDraft: false, isWorking: false, hint: HINT },
+    ...(o.hasViewport === false
+      ? {}
+      : { viewport: { columns: o.columns ?? 120, rows: 40, isFullscreen: o.isFullscreen ?? true } }),
+  })
 }
 
 export const start = ($: Engine, isInteractive = true) =>
