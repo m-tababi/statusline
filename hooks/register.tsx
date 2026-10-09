@@ -139,11 +139,16 @@ function keepTicking($: EngineInterface, leftMs: number): void {
   })
 }
 
-// What the hint line draws; the write redraws it.
+// What the hint line draws; the write redraws it. It never throws: ping() calls it
+// holding the lock, and a failed write only costs the hint line.
 async function show($: EngineInterface, g: Gate, step: Step): Promise<void> {
   if (!isInteractive) return
-  const snap = hintOf(g, step, await read($, lastPing))
-  await update($, hint, () => snap)
+  try {
+    const snap = hintOf(g, step, await read($, lastPing))
+    await update($, hint, () => snap)
+  } catch {
+    // The hint line keeps what it drew last.
+  }
 }
 
 // Plans the next ping from the state as it stands, replacing any earlier timer.
