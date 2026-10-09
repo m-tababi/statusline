@@ -9,7 +9,7 @@ const SCRIPT = new URL('../statusline.mjs', import.meta.url).pathname;
 const FULL = readFileSync(new URL('./fixtures/full.json', import.meta.url), 'utf8');
 
 function run(stdin, env = {}) {
-  const base = { PATH: process.env.PATH, TZ: 'UTC', COLUMNS: '204', CLAUDE_CONFIG_DIR: '/nonexistent/claude-config-for-tests' };
+  const base = { PATH: process.env.PATH, TZ: 'UTC', COLUMNS: '204' };
   return spawnSync(process.execPath, [SCRIPT], {
     input: stdin,
     env: { ...base, ...env },
@@ -53,7 +53,7 @@ test('COLUMNS narrows the line (reserved margin applied)', () => {
 
 test('missing or invalid COLUMNS still renders the full-featured default width', () => {
   for (const cols of [undefined, '', 'abc', '0', 'NaN']) {
-    const base = { PATH: process.env.PATH, TZ: 'UTC', NO_COLOR: '1', CLAUDE_CONFIG_DIR: '/nonexistent/claude-config-for-tests' };
+    const base = { PATH: process.env.PATH, TZ: 'UTC', NO_COLOR: '1' };
     if (cols !== undefined) base.COLUMNS = cols;
     const r = spawnSync(process.execPath, [SCRIPT], { input: FULL, env: base, encoding: 'utf8', timeout: 5000 });
     assert.equal(r.status, 0, `cols=${cols}`);
@@ -82,36 +82,26 @@ test('a git that ignores SIGTERM and hangs cannot stall the line (CIFS guarantee
   }
 });
 
-function withConfigDir(write) {
+test('no keep-alive state file is read: a fresh one of this session changes nothing', () => {
+  const plainLine = run(FULL, { NO_COLOR: '1' }).stdout;
   const dir = mkdtempSync(join(tmpdir(), 'kacfg-'));
-  mkdirSync(join(dir, 'keepalive'));
-  write(join(dir, 'keepalive', '00000000-0000-0000-0000-000000000000.json'));
-  return dir;
-}
-
-test('a keep-alive file of this session adds the marker and its expiry', () => {
-  const dir = withConfigDir((path) => writeFileSync(path, JSON.stringify({
+  const body = JSON.stringify({
     v: 1, sessionId: '00000000-0000-0000-0000-000000000000', enabled: true, state: 'armed', reason: null,
     nextPingAt: Date.now() + 60_000, warmUntil: Date.now() + 30 * 60_000, updatedAt: Date.now(),
-  })));
+  });
   try {
-    const r = run(FULL, { NO_COLOR: '1', CLAUDE_CONFIG_DIR: dir });
-    assert.equal(r.status, 0);
-    assert.equal(r.stderr, '');
-    assert.match(r.stdout, /⚡ {2}(29|30):\d\d ↻ {2}│/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('a corrupt keep-alive file changes nothing', () => {
-  const plainLine = run(FULL, { NO_COLOR: '1' }).stdout;
-  const dir = withConfigDir((path) => writeFileSync(path, '{"v":1,"sessionId":'));
-  try {
-    const r = run(FULL, { NO_COLOR: '1', CLAUDE_CONFIG_DIR: dir });
-    assert.equal(r.status, 0);
-    assert.equal(r.stderr, '');
-    assert.equal(r.stdout, plainLine);
+    // Where the plugin used to write it: under CLAUDE_CONFIG_DIR, else ~/.claude.
+    for (const base of [join(dir, 'cfg'), join(dir, 'home', '.claude')]) {
+      mkdirSync(join(base, 'keepalive'), { recursive: true });
+      writeFileSync(join(base, 'keepalive', '00000000-0000-0000-0000-000000000000.json'), body);
+    }
+    for (const env of [{ CLAUDE_CONFIG_DIR: join(dir, 'cfg') }, { HOME: join(dir, 'home') }]) {
+      const r = run(FULL, { NO_COLOR: '1', ...env });
+      assert.equal(r.status, 0);
+      assert.equal(r.stderr, '');
+      assert.equal(r.stdout, plainLine);
+      assert.ok(!/[⚡❄↻⇡∅]/.test(r.stdout), r.stdout);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -1,9 +1,9 @@
 // The keep-alive's decisions, free of the engine: when to ping, what a ping's
-// reply means, and what the status line and /keepalive status are told.
+// reply means, and what the hint line and /keepalive status are told.
 import type { ModelForkResult } from 'claude-code'
 
-import type { KeepaliveAnchor, KeepalivePing, KeepaliveTtlChoice } from '../types'
-import { SUBSCRIPTION_SOURCE, TTL_MS, fmtSpan, fmtTokens, isWarm, pickUsage, ttlLine, usageLine } from './cache'
+import type { KeepaliveAnchor, KeepaliveDisplayState, KeepaliveHint, KeepalivePing, KeepaliveTtlChoice } from '../types'
+import { SUBSCRIPTION_SOURCE, TTL_MS, fmtClock, fmtSpan, fmtTokens, isWarm, pickUsage, ttlLine, usageLine } from './cache'
 
 // Ping when this much of the entry's lifetime is left (the owner's "bei 5 Minuten").
 export const PING_MARGIN_MS = 5 * 60_000
@@ -88,18 +88,14 @@ export type Step =
   | { kind: 'hold'; reason: string }
   | { kind: 'late' }
 
-export type DisplayState = 'off' | 'armed' | 'pinging' | 'paused'
+export type DisplayState = KeepaliveDisplayState
 
-// What the status line reads, one file per session (schema v1).
-export type StatusFile = {
-  v: 1
-  sessionId: string
-  enabled: boolean
+// What the hint line and /keepalive status say about the switch and the plan.
+export type Display = {
+  isEnabled: boolean
   state: DisplayState
   reason: string | null
   nextPingAt: number | null
-  warmUntil: number | null
-  updatedAt: number
 }
 
 export const pingDelayMs = (ttlMs: number): number => ttlMs - Math.min(PING_MARGIN_MS, Math.floor(ttlMs * MARGIN_SHARE))
@@ -107,11 +103,17 @@ export const pingDelayMs = (ttlMs: number): number => ttlMs - Math.min(PING_MARG
 /** Claude Code touches the entry itself only at the subscriber 1h TTL, and only with its flag on. */
 export const isBuiltinActive = (g: Gate): boolean => g.builtin.state === 'on' && g.main.source === SUBSCRIPTION_SOURCE
 
+type Touching = { windowMs: number; touchMs: number }
+
+function coveredAt(builtin: Touching | null, activityAt: number | null, anchorAt: number, now: number): number {
+  if (builtin === null || activityAt === null) return anchorAt
+  const lastTouch = Math.min(now, activityAt + builtin.windowMs) - builtin.touchMs
+  return Math.max(anchorAt, lastTouch)
+}
+
 /** When the entry was last refreshed: the anchor, or Claude Code's last touch inside its activity window. */
 export function coveredAnchor(g: Gate, anchorAt: number, now: number): number {
-  if (!isBuiltinActive(g) || g.activityAt === null) return anchorAt
-  const lastTouch = Math.min(now, g.activityAt + g.builtin.windowMs) - g.builtin.touchMs
-  return Math.max(anchorAt, lastTouch)
+  return coveredAt(isBuiltinActive(g) ? g.builtin : null, g.activityAt, anchorAt, now)
 }
 
 export function nextStep(g: Gate, now: number): Step {
@@ -128,7 +130,7 @@ export function nextStep(g: Gate, now: number): Step {
   return now < at ? { kind: 'wait', at } : { kind: 'ping' }
 }
 
-export function statusFile(sessionId: string, g: Gate, step: Step, now: number): StatusFile {
+export function displayOf(g: Gate, step: Step): Display {
   const state: DisplayState =
     step.kind === 'off'
       ? 'off'
@@ -137,18 +139,76 @@ export function statusFile(sessionId: string, g: Gate, step: Step, now: number):
         : step.kind === 'wait' || step.kind === 'busy' || step.kind === 'ping'
           ? 'armed'
           : 'paused'
-  const isLive = state === 'armed' || state === 'pinging'
   return {
-    v: 1,
-    sessionId,
-    enabled: g.isEnabled,
+    isEnabled: g.isEnabled,
     state,
     reason: step.kind === 'hold' ? step.reason : step.kind === 'late' ? REASON.late : null,
     nextPingAt: step.kind === 'wait' ? step.at : null,
-    // Only a verified ping vouches for the entry beyond what Claude Code tracks itself.
-    warmUntil: isLive && g.anchor !== null && g.anchor.source === 'ping' ? g.anchor.at + TTL_MS[g.main.ttl] : null,
-    updatedAt: now,
   }
+}
+
+/** What the hint line draws from: the switch, the anchor and how the entry's lifetime is counted. */
+export function hintOf(g: Gate, step: Step, last: KeepalivePing | null): KeepaliveHint {
+  const anchorAt = g.anchor?.at ?? null
+  const builtin = isBuiltinActive(g) ? { windowMs: g.builtin.windowMs, touchMs: g.builtin.touchMs } : null
+  // Waiting for the first answer (or the first after /clear) is no pause of the switch: it shows on.
+  const isStarting = step.kind === 'hold' && (step.reason === REASON.noAnchor || step.reason === REASON.cleared)
+  return {
+    state: isStarting ? 'armed' : displayOf(g, step).state,
+    anchorAt,
+    // A ping that found the entry cold leaves the anchor where it was; only a newer request warms it again.
+    isCold: last !== null && !last.isWarm && anchorAt !== null && last.at >= anchorAt,
+    ttlMs: TTL_MS[g.main.ttl],
+    builtin,
+    activityAt: g.activityAt,
+  }
+}
+
+export type HintClock = { kind: 'warm'; leftMs: number } | { kind: 'cold' } | null
+
+/** The main entry's time left as the keep-alive counts it; null while unknown. */
+export function hintClock(h: KeepaliveHint, now: number): HintClock {
+  if (h.anchorAt === null) return null
+  if (h.isCold) return { kind: 'cold' }
+  const left = coveredAt(h.builtin, h.activityAt, h.anchorAt, now) + h.ttlMs - now
+  return left > 0 ? { kind: 'warm', leftMs: left } : { kind: 'cold' }
+}
+
+const CLOCK_WARN_MS = 10 * 60_000
+const CLOCK_CRIT_MS = 3 * 60_000
+
+export function clockTone(leftMs: number): 'success' | 'warning' | 'error' {
+  return leftMs >= CLOCK_WARN_MS ? 'success' : leftMs >= CLOCK_CRIT_MS ? 'warning' : 'error'
+}
+
+export const clockText = (leftMs: number): string => `⚡  ${fmtClock(leftMs)}`
+
+// The switch as a pill: the glyph and the word, or the glyph alone where the line is short.
+export const PILL: Record<DisplayState, { long: string; short: string }> = {
+  armed: { long: ' ↻ an ', short: ' ↻ ' },
+  pinging: { long: ' ⇡ an ', short: ' ⇡ ' },
+  paused: { long: ' ∅ pausiert ', short: ' ∅ ' },
+  off: { long: ' ⏸ aus ', short: ' ⏸ ' },
+}
+
+// Columns the engine's line needs beyond its text, as the restart pill beside it counts them.
+export const HINT_MARGIN = 8
+const HINT_GAP = 2
+
+/** Which pill fits beside the engine's line; null when only that line fits. */
+export function hintSize(
+  columns: number | undefined,
+  hint: string,
+  clock: HintClock,
+  state: DisplayState,
+): 'long' | 'short' | null {
+  if (columns === undefined) return 'long'
+  const room = columns - hint.length - HINT_MARGIN
+  // The bolt is two columns wide; the snowflake one.
+  const lead = clock === null ? 0 : (clock.kind === 'cold' ? 1 : clockText(clock.leftMs).length + 1) + HINT_GAP
+  if (lead + PILL[state].long.length + HINT_GAP <= room) return 'long'
+  if (lead + PILL[state].short.length + HINT_GAP <= room) return 'short'
+  return null
 }
 
 export function settlePing(reply: ModelForkResult, startedAt: number): { pause: string | null; ping: KeepalivePing | null } {
@@ -193,13 +253,13 @@ function builtinLine(g: Gate, now: number): string {
 
 const STATE_WORD: Record<DisplayState, string> = { off: 'aus', armed: 'bereit', pinging: 'pingt gerade', paused: 'pausiert' }
 
-export function statusText(f: StatusFile, g: Gate, last: KeepalivePing | null, now: number): string {
-  const head = f.enabled
-    ? `Keep-alive an · ${STATE_WORD[f.state]}${f.reason === null ? '' : `: ${f.reason}`}`
-    : 'Keep-alive aus'
+export function statusText(d: Display, g: Gate, last: KeepalivePing | null, now: number): string {
+  const head = d.isEnabled
+    ? `Keep-alive an (diese Sitzung) · ${STATE_WORD[d.state]}${d.reason === null ? '' : `: ${d.reason}`}`
+    : 'Keep-alive aus (diese Sitzung)'
   const lines = [head, ttlLine(g.main, g.fork), builtinLine(g, now)]
   if (g.anchor !== null) lines.push(`Letzte Anfrage vor ${fmtSpan(now - g.anchor.at)} (${g.anchor.source === 'ping' ? 'Ping' : 'Turn'})`)
-  if (f.nextPingAt !== null) lines.push(`Nächster Ping in ${fmtSpan(f.nextPingAt - now)}`)
+  if (d.nextPingAt !== null) lines.push(`Nächster Ping in ${fmtSpan(d.nextPingAt - now)}`)
   if (last !== null) lines.push(`Letzter Ping vor ${fmtSpan(now - last.at)}: ${usageLine(last.usage)}`)
   return lines.join('\n')
 }

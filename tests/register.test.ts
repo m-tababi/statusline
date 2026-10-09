@@ -1,26 +1,55 @@
 import { describe, expect, test } from 'claude-code/testing'
-import type { ModelForkResult } from 'claude-code'
+import type { Engine } from 'claude-code/testing'
+import type { ModelForkResult, On } from 'claude-code'
 
-import { FORK_PING_PROMPT, KEEPALIVE_USAGE, REASON } from '../hooks/keepalive'
-import { COLD, HOME, MIN, START, ZERO, command, complete, forkReply, start, stepOnly, turn, world } from './world'
+import { FORK_PING_PROMPT, KEEPALIVE_USAGE, PILL, REASON } from '../hooks/keepalive'
+import {
+  COLD, ENGINE_LINE, HINT, HOME, MIN, START, ZERO, command, complete, forkReply, hintLine, peek, PEEK, start, stepOnly, turn, world,
+} from './world'
 
-const FILE = `${HOME}/.claude/keepalive/s1.json`
-const status = (seen: ReturnType<typeof world>) => JSON.parse(seen.files.get(FILE) ?? 'null') as Record<string, unknown> | null
+const NEXT_PING = 'Nächster Ping in '
+const WITH_PEEK = { plugins: [PEEK] }
+
+// Holds the keep-alive's "pinging" write for a second: the await before the fork.
+const SLOW_PINGING = {
+  name: 'slow-pinging',
+  register(on: On) {
+    on('state.set', { plugin: 'statusline', key: 'hint' }, async ($, e, next) => {
+      if ((e.value as { state?: unknown } | null)?.state === 'pinging') await $.clock.sleep(1000)
+      return next(e)
+    })
+  },
+}
+
+const STATE_OF: Record<string, string> = { bereit: 'armed', 'pingt gerade': 'pinging', pausiert: 'paused' }
+
+/** The keep-alive's state, reason and next ping as /keepalive status says them, with the hint line's anchor. */
+async function status($: Engine) {
+  const snap = (await peek($)).hint
+  const lines = (await command($, 'keepalive', 'status')).split('\n')
+  const word = /^Keep-alive an \(diese Sitzung\) · ([^:]+)/.exec(lines[0] ?? '')?.[1]
+  return {
+    state: word === undefined ? (lines[0] === 'Keep-alive aus (diese Sitzung)' ? 'off' : null) : (STATE_OF[word] ?? word),
+    anchorAt: snap?.anchorAt ?? null,
+    isCold: snap?.isCold ?? null,
+    reason: /^Keep-alive an \(diese Sitzung\) · [^:]+: (.*)$/.exec(lines[0] ?? '')?.[1] ?? null,
+    nextPing: lines.find(line => line.startsWith(NEXT_PING))?.slice(NEXT_PING.length) ?? null,
+  }
+}
 
 describe('keep-alive timing', () => {
-  test('pings once, five minutes before a 1h entry expires, then re-dates the entry', async ($, on) => {
+  test('pings once, five minutes before a 1h entry expires, then re-dates the entry', WITH_PEEK, async ($, on) => {
     const seen = world(on)
     await start($)
     await turn($, 't1')
-    expect(status(seen)).toMatchObject({
-      v: 1, sessionId: 's1', enabled: true, state: 'armed', reason: null, nextPingAt: START + 55 * MIN, warmUntil: null,
-    })
+    expect(await status($)).toEqual({ state: 'armed', anchorAt: START, isCold: false, reason: null, nextPing: '55:00' })
 
     await seen.clock.advance(55 * MIN - 1)
     expect(seen.forks).toEqual([])
     await seen.clock.advance(1)
     expect(seen.forks).toEqual([FORK_PING_PROMPT])
-    expect(status(seen)).toMatchObject({ state: 'armed', nextPingAt: START + 110 * MIN, warmUntil: START + 115 * MIN })
+    // The ping re-dated the entry: the next one is 55 minutes after it.
+    expect(await status($)).toMatchObject({ state: 'armed', anchorAt: START + 55 * MIN, nextPing: '55:00' })
   })
 
   test('keeps pinging while idle, with no cap', async ($, on) => {
@@ -39,7 +68,7 @@ describe('keep-alive timing', () => {
     expect(seen.forks).toHaveLength(1)
   })
 
-  test('no ping while a turn runs; the turn re-arms from its own request', async ($, on) => {
+  test('no ping while a turn runs; the turn re-arms from its own request', WITH_PEEK, async ($, on) => {
     const seen = world(on)
     await start($)
     await turn($, 't1')
@@ -49,10 +78,10 @@ describe('keep-alive timing', () => {
     expect(seen.forks).toEqual([])
     await stepOnly($, 't2')
     await complete($, 't2')
-    expect(status(seen)).toMatchObject({ state: 'armed', nextPingAt: START + 115 * MIN })
+    expect(await status($)).toMatchObject({ state: 'armed', anchorAt: START + 60 * MIN, nextPing: '55:00' })
   })
 
-  test('a timer that comes too late does not fork and pauses', async ($, on) => {
+  test('a timer that comes too late does not fork and pauses', WITH_PEEK, async ($, on) => {
     const seen = world(on)
     await start($)
     await turn($, 't1')
@@ -61,7 +90,7 @@ describe('keep-alive timing', () => {
     const text = await command($, 'keepalive', 'on')
     expect(seen.forks).toEqual([])
     expect(text).toContain(`pausiert: ${REASON.late}`)
-    expect(status(seen)).toMatchObject({ state: 'paused', reason: REASON.late })
+    expect(await status($)).toMatchObject({ state: 'paused', reason: REASON.late })
     await seen.clock.advance(2 * 60 * MIN)
     expect(seen.forks).toEqual([])
   })
@@ -76,25 +105,30 @@ describe('keep-alive timing', () => {
     expect(seen.forks).toHaveLength(1)
   })
 
-  test('a non-interactive session never pings and writes no file', async ($, on) => {
+  test('a non-interactive session never pings and leaves the hint line alone', WITH_PEEK, async ($, on) => {
     const seen = world(on)
     await start($, false)
     await turn($, 't1')
     await seen.clock.advance(2 * 60 * MIN)
     expect(seen.forks).toEqual([])
-    expect(seen.files.size).toBe(0)
+    expect((await peek($)).hint).toBe(null)
   })
 
-  test('CLAUDE_CONFIG_DIR moves the status file', async ($, on) => {
-    const seen = world(on, { env: { CLAUDE_CONFIG_DIR: '/cfg/' } })
+  test('no file is written, pings and pauses included', async ($, on) => {
+    const seen = world(on)
+    seen.forkReplies.push(forkReply(), forkReply(COLD))
     await start($)
     await turn($, 't1')
-    expect([...seen.files.keys()]).toEqual(['/cfg/keepalive/s1.json'])
+    await seen.clock.advance(2 * 55 * MIN)
+    expect(seen.forks).toHaveLength(2)
+    await command($, 'keepalive', 'off')
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+    expect(seen.files.size).toBe(0)
   })
 })
 
 describe('keep-alive verification', () => {
-  test('a cold ping pauses until the next real turn', async ($, on) => {
+  test('a cold ping pauses until the next real turn', WITH_PEEK, async ($, on) => {
     const seen = world(on)
     seen.forkReplies.push(forkReply(COLD))
     await start($)
@@ -102,48 +136,48 @@ describe('keep-alive verification', () => {
     await seen.clock.advance(55 * MIN)
     expect(seen.forks).toHaveLength(1)
     expect(seen.toasts).toEqual(['Keep-alive pausiert: Cache war kalt (read 18.0k, voll bezahlt 22.0k)'])
-    expect(status(seen)).toMatchObject({ state: 'paused', warmUntil: null })
+    expect(await status($)).toMatchObject({ state: 'paused', isCold: true })
 
     await seen.clock.advance(3 * 60 * MIN)
     expect(seen.forks).toHaveLength(1)
 
     await turn($, 't2')
-    expect(status(seen)).toMatchObject({ state: 'armed', reason: null, nextPingAt: seen.clock.now() + 55 * MIN })
+    expect(await status($)).toMatchObject({ state: 'armed', isCold: false, reason: null, nextPing: '55:00' })
   })
 
-  test('an API error pauses', async ($, on) => {
+  test('an API error pauses', WITH_PEEK, async ($, on) => {
     const seen = world(on)
     seen.forkReplies.push({ isAnswered: false, reason: 'api-error', status: 429, error: 'rate_limit', usage: ZERO })
     await start($)
     await turn($, 't1')
     await seen.clock.advance(55 * MIN)
-    expect(status(seen)).toMatchObject({ state: 'paused', reason: 'Ping fehlgeschlagen: API-Fehler 429' })
+    expect(await status($)).toMatchObject({ state: 'paused', reason: 'Ping fehlgeschlagen: API-Fehler 429' })
   })
 
-  test('nothing to fork pauses', async ($, on) => {
+  test('nothing to fork pauses', WITH_PEEK, async ($, on) => {
     const seen = world(on)
     seen.forkReplies.push({ isAnswered: false, reason: 'nothing-to-fork' })
     await start($)
     await turn($, 't1')
     await seen.clock.advance(55 * MIN)
-    expect(status(seen)).toMatchObject({ state: 'paused', reason: REASON.nothingToFork })
+    expect(await status($)).toMatchObject({ state: 'paused', reason: REASON.nothingToFork })
   })
 
-  test('single flight: no second fork while one runs', async ($, on) => {
+  test('single flight: no second fork while one runs', WITH_PEEK, async ($, on) => {
     const seen = world(on)
     let release: (value: ModelForkResult) => void = () => undefined
     seen.forkReplies.push(() => new Promise<ModelForkResult>(resolve => (release = resolve)))
     await start($)
     await turn($, 't1')
     await seen.clock.advance(55 * MIN)
-    expect(status(seen)).toMatchObject({ state: 'pinging' })
+    expect(await status($)).toMatchObject({ state: 'pinging' })
     await command($, 'keepalive', 'on')
     await seen.clock.advance(1000)
     expect(seen.forks).toHaveLength(1)
     release(forkReply())
     await seen.clock.settle()
     expect(seen.forks).toHaveLength(1)
-    expect(status(seen)).toMatchObject({ state: 'armed', nextPingAt: START + 110 * MIN })
+    expect(await status($)).toMatchObject({ state: 'armed', anchorAt: START + 55 * MIN, nextPing: '54:59' })
   })
 })
 
@@ -231,7 +265,7 @@ describe('/keepalive', () => {
     await turn($, 't1')
     await seen.clock.advance(5 * MIN)
     expect((await command($, 'keepalive', '')).split('\n')).toEqual([
-      'Keep-alive an · bereit',
+      'Keep-alive an (diese Sitzung) · bereit',
       'TTL Hauptverlauf 1h (default (subscription)) · Fork 5m (default)',
       'Eingebauter Keep-alive (tengu_sequential_cloud): nicht lesbar, gilt als aus',
       'Letzte Anfrage vor 5:00 (Turn)',
@@ -240,65 +274,301 @@ describe('/keepalive', () => {
     expect(await command($, 'keepalive', 'maybe')).toBe(KEEPALIVE_USAGE)
   })
 
-  test('off stops pings, persists into a new session; on turns them back on', async ($, on) => {
+  test('off stops pings for this session and survives a hot reload; on plans again', WITH_PEEK, async ($, on) => {
     const seen = world(on)
     await start($)
     await turn($, 't1')
-    expect((await command($, 'keepalive', 'off')).split('\n')[0]).toBe('Keep-alive aus')
-    expect(seen.stored.get('enabled')).toBe(false)
-    expect(status(seen)).toMatchObject({ enabled: false, state: 'off' })
+    expect((await command($, 'keepalive', 'off')).split('\n')[0]).toBe('Keep-alive aus (diese Sitzung)')
+    expect(seen.stored.has('enabled')).toBe(false)
+    expect(await status($)).toMatchObject({ state: 'off' })
     await seen.clock.advance(3 * 60 * MIN)
     expect(seen.forks).toEqual([])
 
+    // A hot reload raises session.start again: the switch stays off.
     await start($)
     await turn($, 't2')
     await seen.clock.advance(60 * MIN)
     expect(seen.forks).toEqual([])
 
-    await command($, 'keepalive', 'on')
-    expect(seen.stored.get('enabled')).toBe(true)
+    expect((await command($, 'keepalive', 'on')).split('\n')[0]).toMatch(/^Keep-alive an \(diese Sitzung\) · /)
+    expect(seen.stored.has('enabled')).toBe(false)
     await turn($, 't3')
     await seen.clock.advance(55 * MIN)
     expect(seen.forks).toHaveLength(1)
   })
 
-  test('off written by another session stops this one at its next due time', async ($, on) => {
+  test('every session starts on: a stored global "off" is ignored', async ($, on) => {
+    const seen = world(on, { store: { enabled: false } })
+    await start($)
+    await turn($, 't1')
+    await seen.clock.advance(55 * MIN)
+    expect(seen.forks).toHaveLength(1)
+  })
+
+  test('/clear starts the next session switched on', async ($, on) => {
     const seen = world(on)
     await start($)
     await turn($, 't1')
-    seen.stored.set('enabled', false)
+    await command($, 'keepalive', 'off')
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+    await turn($, 't2')
     await seen.clock.advance(55 * MIN)
+    expect(seen.forks).toHaveLength(1)
+  })
+})
+
+describe('hint line', () => {
+  const texts = async (ui: Awaited<ReturnType<typeof hintLine>>) => (await ui.findAll({ type: 'Text' })).map(t => t.text)
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    test(`draws the clock and the switch before the engine line (${surface})`, async ($, on) => {
+      const seen = world(on)
+      await start($)
+      await turn($, 't1')
+      await seen.clock.advance(5 * MIN + 50_000)
+      const ui = await hintLine($, { surface })
+
+      const drawn = (await ui.drawn()) as { type: string; props: unknown; children: unknown[] }
+      expect(drawn).toMatchObject({ type: 'Box', props: { flexDirection: 'row', columnGap: 2 } })
+      expect(drawn.children).toHaveLength(2)
+      expect(drawn.children[1]).toEqual(ENGINE_LINE)
+      expect(await ui.find({ type: 'Text', text: '⚡  54:10' })).toMatchObject({ props: { color: 'success', bold: true } })
+      expect(await ui.find({ type: 'Button', key: 'keepalive' })).toMatchObject({ props: { plain: true } })
+      expect(await ui.find({ type: 'Text', text: PILL.armed.long })).toMatchObject({
+        props: { backgroundColor: 'success', color: 'inverseText' },
+      })
+      expect(await texts(ui)).toEqual(['⚡  54:10', PILL.armed.long])
+    })
+  }
+
+  test('the clock ticks every second while it shows, in green, yellow and red', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    await turn($, 't1')
+    await command($, 'keepalive', 'off')
+    await seen.clock.advance(50 * MIN)
+    const ui = await hintLine($)
+    const clock = async () => (await ui.find({ type: 'Text', text: /⚡/ }))?.props.color
+    expect(await ui.find({ type: 'Text', text: '⚡  10:00' })).toBeDefined()
+    expect(await clock()).toBe('success')
+    await seen.clock.advance(1000)
+    expect(await ui.find({ type: 'Text', text: '⚡  9:59' })).toBeDefined()
+    expect(await clock()).toBe('warning')
+    await seen.clock.advance(7 * MIN - 1000)
+    expect(await ui.find({ type: 'Text', text: '⚡  3:00' })).toBeDefined()
+    expect(await clock()).toBe('warning')
+    await seen.clock.advance(1000)
+    expect(await ui.find({ type: 'Text', text: '⚡  2:59' })).toBeDefined()
+    expect(await clock()).toBe('error')
+    expect(await ui.find({ type: 'Text', text: PILL.off.long })).toMatchObject({ props: { backgroundColor: 'inactive' } })
+  })
+
+  test('a lapsed entry shows a grey snowflake and the tick stops', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    await turn($, 't1')
+    await command($, 'keepalive', 'off')
+    await seen.clock.advance(60 * MIN - 10_000)
+    const ui = await hintLine($)
+    expect(await ui.find({ type: 'Text', text: '⚡  0:10' })).toBeDefined()
+    await seen.clock.advance(10_000)
+    expect(await ui.find({ type: 'Text', text: '❄' })).toMatchObject({ props: { color: 'inactive' } })
+    expect(await ui.find({ type: 'Text', text: /⚡/ })).toBeUndefined()
+    const ticks = seen.invalidates
+    await seen.clock.advance(10_000)
+    expect(seen.invalidates).toBe(ticks)
+  })
+
+  test('no clock and no tick before the first answer; the switch shows on', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    const ui = await hintLine($)
+    expect(await texts(ui)).toEqual([PILL.armed.long])
+    const ticks = seen.invalidates
+    await seen.clock.advance(10_000)
+    expect(seen.invalidates).toBe(ticks)
+
+    await turn($, 't1')
+    await seen.clock.advance(3000)
+    expect(seen.invalidates).toBeGreaterThanOrEqual(ticks + 3)
+    expect(await texts(ui)).toEqual(['⚡  59:57', PILL.armed.long])
+  })
+
+  test('no clock after /clear; the switch shows on', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    await turn($, 't1')
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+    const ui = await hintLine($)
+    expect(await texts(ui)).toEqual([PILL.armed.long])
+    const ticks = seen.invalidates
+    await seen.clock.advance(10_000)
+    expect(seen.invalidates).toBe(ticks)
+  })
+
+  test('a compaction shows no clock and the pause', async ($, on) => {
+    world(on)
+    await start($)
+    await turn($, 't1')
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'summary', toolUses: [] }] })
+    const ui = await hintLine($)
+    expect(await texts(ui)).toEqual([PILL.paused.long])
+  })
+
+  test('the clock starts from the first request, before the turn ends', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    await $.turn.start({ text: 'x', turnId: 't1' })
+    await stepOnly($, 't1')
+    const ui = await hintLine($)
+    expect(await texts(ui)).toEqual(['⚡  60:00', PILL.armed.long])
+    await seen.clock.advance(1000)
+    expect(await texts(ui)).toEqual(['⚡  59:59', PILL.armed.long])
+  })
+
+  test('a request inside a running turn re-dates the clock at once', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    await turn($, 't1')
+    await seen.clock.advance(30 * MIN)
+    await $.turn.start({ text: 'x', turnId: 't2' })
+    await stepOnly($, 't2')
+    const ui = await hintLine($)
+    await seen.clock.advance(1000)
+    expect(await texts(ui)).toEqual(['⚡  59:59', PILL.armed.long])
+    // The ping timing is the turn end's: 55 minutes after this request.
+    await complete($, 't2')
+    await seen.clock.advance(55 * MIN - 1001)
     expect(seen.forks).toEqual([])
-    expect(status(seen)).toMatchObject({ state: 'off' })
+    await seen.clock.advance(1)
+    expect(seen.forks).toEqual([FORK_PING_PROMPT])
+  })
+
+  test('a surface too narrow for the clock does not stop its tick', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    await turn($, 't1')
+    const wide = await hintLine($)
+    const narrow = await hintLine($, { columns: HINT.length + 8 + 15 })
+    expect(await narrow.drawn()).toEqual(ENGINE_LINE)
+    await seen.clock.advance(3000)
+    expect(await texts(wide)).toEqual(['⚡  59:57', PILL.armed.long])
+  })
+
+  test('a cold ping shows the snowflake at once, paused', async ($, on) => {
+    const seen = world(on)
+    seen.forkReplies.push(forkReply(COLD))
+    await start($)
+    await turn($, 't1')
+    await seen.clock.advance(55 * MIN)
+    const ui = await hintLine($)
+    expect(await texts(ui)).toEqual(['❄', PILL.paused.long])
+  })
+
+  test('a ping in flight shows ⇡, then the new entry', async ($, on) => {
+    const seen = world(on)
+    let release: (value: ModelForkResult) => void = () => undefined
+    seen.forkReplies.push(() => new Promise<ModelForkResult>(resolve => (release = resolve)))
+    await start($)
+    await turn($, 't1')
+    await seen.clock.advance(55 * MIN)
+    const ui = await hintLine($)
+    expect(await texts(ui)).toEqual(['⚡  5:00', PILL.pinging.long])
+    release(forkReply())
+    await seen.clock.settle()
+    expect(await texts(ui)).toEqual(['⚡  60:00', PILL.armed.long])
+  })
+
+  test('pressing the switch turns the keep-alive off and on for this session', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    await turn($, 't1')
+    await seen.clock.advance(54 * MIN)
+    const ui = await hintLine($)
+    await ui.press({ key: 'keepalive' })
+    expect(await ui.find({ type: 'Text', text: PILL.off.long })).toBeDefined()
+    expect((await command($, 'keepalive', 'status')).split('\n')[0]).toBe('Keep-alive aus (diese Sitzung)')
+    // The ping was due at 55:00.
+    await seen.clock.advance(2 * MIN)
+    expect(seen.forks).toEqual([])
+
+    // Back on at 56:00: the ping is due at once, planned by the press.
+    await ui.press({ key: 'keepalive' })
+    await seen.clock.settle()
+    expect(seen.forks).toEqual([FORK_PING_PROMPT])
+    expect(await texts(ui)).toEqual(['⚡  60:00', PILL.armed.long])
+  })
+
+  test('the main screen draws the text without a button', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    await turn($, 't1')
+    const ui = await hintLine($, { isFullscreen: false })
+    expect(await texts(ui)).toEqual(['⚡  60:00', PILL.armed.long])
+    expect(await ui.find({ type: 'Button' })).toBeUndefined()
+    await seen.clock.advance(1000)
+    expect(await texts(ui)).toEqual(['⚡  59:59', PILL.armed.long])
+  })
+
+  test('narrows the switch to its glyph, then leaves only the engine line', async ($, on) => {
+    world(on)
+    await start($)
+    await turn($, 't1')
+    // room = columns - hint - 8; the clock "⚡  60:00" and its gap take 11, the long pill 8, the short one 5.
+    const room = (n: number) => HINT.length + 8 + n
+    const long = await hintLine($, { columns: room(19) })
+    expect(await texts(long)).toEqual(['⚡  60:00', PILL.armed.long])
+    await long.unmount()
+    const short = await hintLine($, { columns: room(18) })
+    expect(await texts(short)).toEqual(['⚡  60:00', PILL.armed.short])
+    await short.unmount()
+    const none = await hintLine($, { columns: room(15) })
+    expect(await none.drawn()).toEqual(ENGINE_LINE)
+  })
+
+  test('a desktop that has not measured gets the long pill', async ($, on) => {
+    world(on)
+    await start($)
+    await turn($, 't1')
+    const ui = await hintLine($, { surface: 'desktop', hasViewport: false })
+    expect(await texts(ui)).toEqual(['⚡  60:00', PILL.armed.long])
+  })
+
+  test('a non-interactive session draws only the engine line', async ($, on) => {
+    world(on)
+    await start($, false)
+    await turn($, 't1')
+    const ui = await hintLine($)
+    expect(await ui.drawn()).toEqual(ENGINE_LINE)
   })
 })
 
 describe('pauses', () => {
-  test('compaction pauses until the next turn', async ($, on) => {
+  test('compaction pauses until the next turn', WITH_PEEK, async ($, on) => {
     const seen = world(on)
     await start($)
     await turn($, 't1')
     await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'summary', toolUses: [] }] })
-    expect(status(seen)).toMatchObject({ state: 'paused', reason: REASON.compacted })
+    expect(await status($)).toMatchObject({ state: 'paused', anchorAt: null, reason: REASON.compacted })
     await seen.clock.advance(2 * 60 * MIN)
     expect(seen.forks).toEqual([])
     await turn($, 't2')
-    expect(status(seen)).toMatchObject({ state: 'armed' })
+    expect(await status($)).toMatchObject({ state: 'armed' })
   })
 
-  test("a subagent's compaction and a precompute do not pause", async ($, on) => {
+  test("a subagent's compaction and a precompute do not pause", WITH_PEEK, async ($, on) => {
     const seen = world(on)
     await start($)
     await turn($, 't1')
     const messages = [{ role: 'user' as const, text: 'summary', toolUses: [] }]
     await $.session.compact({ trigger: 'auto', agentId: 'a1', messages })
     await $.session.compact({ trigger: 'precompute', messages })
-    expect(status(seen)).toMatchObject({ state: 'armed', nextPingAt: START + 55 * MIN })
+    expect(await status($)).toMatchObject({ state: 'armed', nextPing: '55:00' })
     await seen.clock.advance(55 * MIN)
     expect(seen.forks).toHaveLength(1)
   })
 
-  test('a model switch pauses', async ($, on) => {
+  test('a model switch pauses', WITH_PEEK, async ($, on) => {
     const seen = world(on)
     await start($)
     await turn($, 't1')
@@ -313,17 +583,17 @@ describe('pauses', () => {
       estimated_cache_write_usd: 0.4,
       pricing: 'catalog',
     })
-    expect(status(seen)).toMatchObject({ state: 'paused', reason: REASON.modelSwitch })
+    expect(await status($)).toMatchObject({ state: 'paused', reason: REASON.modelSwitch })
     await seen.clock.advance(60 * MIN)
     expect(seen.forks).toEqual([])
   })
 
-  test('/clear pauses and writes the ending session file', async ($, on) => {
+  test('/clear pauses and forgets the entry', WITH_PEEK, async ($, on) => {
     const seen = world(on)
     await start($)
     await turn($, 't1')
     await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
-    expect(status(seen)).toMatchObject({ state: 'paused', reason: REASON.cleared })
+    expect(await status($)).toMatchObject({ state: 'paused', anchorAt: null, reason: REASON.cleared })
     await seen.clock.advance(60 * MIN)
     expect(seen.forks).toEqual([])
   })
@@ -353,24 +623,22 @@ describe('races', () => {
     expect(seen.forks).toHaveLength(1)
   })
 
-  test('a session that ends while the ping status is written sends no fork', async ($, on) => {
+  test('a session that ends while the ping state is written sends no fork', { plugins: [PEEK, SLOW_PINGING] }, async ($, on) => {
     const seen = world(on)
     await start($)
     await turn($, 't1')
-    seen.afterWrite = async () => {
-      if (!seen.files.get(FILE)?.includes('"pinging"')) return
-      seen.afterWrite = undefined
-      await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
-    }
     void seen.clock.advance(55 * MIN)
     await seen.clock.settle()
+    // The ping now waits on its own state write: the session ends meanwhile.
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+    await seen.clock.advance(1000)
     expect(seen.forks).toEqual([])
-    expect(status(seen)).toMatchObject({ state: 'paused', reason: REASON.cleared })
+    expect(await status($)).toMatchObject({ state: 'paused', reason: REASON.cleared })
     await seen.clock.advance(2 * 60 * MIN)
     expect(seen.forks).toEqual([])
   })
 
-  test('a ping in flight at session end writes nothing afterwards', async ($, on) => {
+  test('a ping in flight at session end writes nothing afterwards', WITH_PEEK, async ($, on) => {
     const seen = world(on)
     let release: (value: ModelForkResult) => void = () => undefined
     seen.forkReplies.push(() => new Promise<ModelForkResult>(resolve => (release = resolve)))
@@ -378,13 +646,14 @@ describe('races', () => {
     await turn($, 't1')
     void seen.clock.advance(55 * MIN)
     await seen.clock.settle()
-    expect(status(seen)).toMatchObject({ state: 'pinging' })
+    expect(await status($)).toMatchObject({ state: 'pinging' })
     await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
-    const written = seen.files.get(FILE)
+    const ended = await status($)
+    expect(ended).toMatchObject({ state: 'paused', reason: REASON.cleared })
     release(forkReply(COLD))
     await seen.clock.settle()
-    expect(seen.files.get(FILE)).toBe(written)
-    expect(status(seen)).toMatchObject({ state: 'paused', reason: REASON.cleared })
+    expect(await status($)).toEqual(ended)
+    expect((await peek($)).lastPing).toBe(null)
     expect(seen.toasts).toEqual([])
     await seen.clock.advance(2 * 60 * MIN)
     expect(seen.forks).toHaveLength(1)

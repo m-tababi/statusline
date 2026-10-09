@@ -2,7 +2,7 @@ process.env.TZ = 'UTC';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  clampPct, gradientBar, bold, paint, visibleWidth, fmtSpan, fmtClock, weekdayShort, toMs,
+  clampPct, gradientBar, bold, paint, visibleWidth, fmtSpan, weekdayShort, toMs,
 } from '../lib/format.mjs';
 
 test('clampPct rounds, clamps and rejects non-numbers', () => {
@@ -51,12 +51,10 @@ test('visibleWidth strips ANSI and counts the lightning bolt as two columns', ()
   assert.equal(visibleWidth('◆ ⎇ ❄ ⏱ ▕█▏'), 11);
 });
 
-test('fmtSpan and fmtClock', () => {
+test('fmtSpan', () => {
   assert.equal(fmtSpan(7800e3), '2h10');
   assert.equal(fmtSpan(45 * 60e3 + 59e3), '45m');
   assert.equal(fmtSpan(-5), '0m');
-  assert.equal(fmtClock(192e3), '3:12');
-  assert.equal(fmtClock(-1), '0:00');
 });
 
 test('weekdayShort uses local time (TZ pinned to UTC in this file)', () => {
