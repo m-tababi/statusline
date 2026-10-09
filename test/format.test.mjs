@@ -2,7 +2,7 @@ process.env.TZ = 'UTC';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  clampPct, bar, pctColor, paint, visibleWidth, fmtSpan, fmtClock, weekdayShort, toMs, COLOR,
+  clampPct, gradientBar, bold, paint, visibleWidth, fmtSpan, fmtClock, weekdayShort, toMs,
 } from '../lib/format.mjs';
 
 test('clampPct rounds, clamps and rejects non-numbers', () => {
@@ -15,21 +15,29 @@ test('clampPct rounds, clamps and rejects non-numbers', () => {
   assert.equal(clampPct('50'), null);
 });
 
-test('bar is always five cells of eighth blocks', () => {
-  assert.equal(bar(0), '     ');
-  assert.equal(bar(100), '█████');
-  assert.equal(bar(50), '██▌  ');
-  assert.equal(bar(58), '██▉  ');
-  assert.equal(bar(12), '▋    ');
-  assert.equal(bar(34), '█▊   ');
-  for (let p = 0; p <= 100; p++) assert.equal([...bar(p)].length, 5, `p=${p}`);
+test('gradientBar fills round(p/100*8) of eight cells', () => {
+  const filled = (p) => [...gradientBar(p, false)].filter((c) => c === '\u2501').length;
+  assert.equal(filled(0), 0);
+  assert.equal(filled(58), 5);
+  assert.equal(filled(100), 8);
+  assert.equal(gradientBar(0, false), '\u2500'.repeat(8));
+  assert.equal(gradientBar(58, false), '\u2501'.repeat(5) + '\u2500'.repeat(3));
+  assert.equal(gradientBar(100, false), '\u2501'.repeat(8));
+  for (let p = 0; p <= 100; p++) assert.equal([...gradientBar(p, false)].length, 8, `p=${p}`);
 });
 
-test('pctColor thresholds 49/50/79/80', () => {
-  assert.equal(pctColor(49), COLOR.green);
-  assert.equal(pctColor(50), COLOR.yellow);
-  assert.equal(pctColor(79), COLOR.yellow);
-  assert.equal(pctColor(80), COLOR.red);
+test('gradientBar colours filled cells green to red by position, empty cells grey', () => {
+  const bar = gradientBar(100, true);
+  assert.ok(bar.startsWith('\x1b[38;2;90;200;120m\u2501\x1b[39m'), bar);
+  assert.ok(bar.endsWith('\x1b[38;2;255;80;120m\u2501\x1b[39m'), bar);
+  const half = gradientBar(50, true);
+  assert.equal(half.split('\x1b[38;5;238m\u2501\x1b[39m').length - 1, 4);
+  assert.equal(visibleWidth(half), 8);
+});
+
+test('bold wraps in bold and reset only when enabled', () => {
+  assert.equal(bold('x', true), '\x1b[1mx\x1b[0m');
+  assert.equal(bold('x', false), 'x');
 });
 
 test('paint adds and resets the foreground only when enabled', () => {

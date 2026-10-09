@@ -15,7 +15,7 @@ const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
 test('full fixture renders every group in order', () => {
   assert.equal(
     plain(full()),
-    '◆ Opus 5.5 high   ctx ▕██▉  ▏58%   5h ▕▋    ▏12% ·2h10   7d ▕█▊   ▏34% ·Mo   ⎇ master● proj   ⚡ 3:12   ⏱ 1h12',
+    ['◆ Opus 5.5 high', 'ctx ━━━━━─── 58%', '5h ━─────── 12% 2h10', '7d ━━━───── 34% Mo', '⎇  master ●  proj', '⚡  3:12', '⏱ 1h12'].join('  │  '),
   );
 });
 
@@ -34,15 +34,15 @@ test('without rate_limits the 5h and 7d groups disappear', () => {
   delete input.rate_limits;
   const line = plain(input);
   assert.ok(!line.includes('5h') && !line.includes('7d'), line);
-  assert.ok(line.includes('ctx ▕'), line);
+  assert.ok(line.includes('ctx '), line);
 });
 
 test('missing effort is omitted, missing model shows ?', () => {
   const input = full();
   delete input.effort;
-  assert.ok(plain(input).startsWith('◆ Opus 5.5   ctx'));
+  assert.ok(plain(input).startsWith('◆ Opus 5.5  │  ctx'));
   delete input.model;
-  assert.ok(plain(input).startsWith('◆ ?   ctx'));
+  assert.ok(plain(input).startsWith('◆ ?  │  ctx'));
 });
 
 test('context used_percentage null (before the first answer) drops the ctx group', () => {
@@ -54,26 +54,26 @@ test('context used_percentage null (before the first answer) drops the ctx group
 test('cold cache shows a snowflake', () => {
   const input = full();
   input.prompt_cache = { warm: false, ttl: '5m', expires_at: null };
-  assert.ok(plain(input).includes('   ❄   ⏱'));
+  assert.ok(plain(input).includes('  │  ❄  │  ⏱'));
 });
 
 test('warm cache with expires_at null shows the bolt without a clock', () => {
   const input = full();
   input.prompt_cache.expires_at = null;
-  assert.ok(plain(input).includes('proj   ⚡   ⏱'));
+  assert.ok(plain(input).includes('proj  │  ⚡  │  ⏱'));
 });
 
 test('warm cache already expired shows a snowflake, never a negative clock', () => {
   const input = full();
   input.prompt_cache.expires_at = NOW / 1000 - 5;
   const line = plain(input);
-  assert.ok(line.includes('   ❄   ⏱') && !line.includes('-'), line);
+  assert.ok(line.includes('  │  ❄  │  ⏱') && !line.includes('-'), line);
 });
 
 test('resets_at in the past drops only the reset hint', () => {
   const input = full();
   input.rate_limits.five_hour.resets_at = NOW / 1000 - 60;
-  assert.ok(plain(input).includes('5h ▕▋    ▏12%   7d'));
+  assert.ok(plain(input).includes('5h ━─────── 12%  │  7d'));
 });
 
 test('resets_at in milliseconds is read like seconds', () => {
@@ -86,23 +86,59 @@ test('resets_at in milliseconds is read like seconds', () => {
 test('7d reset under 24 h shows the remaining time instead of the weekday', () => {
   const input = full();
   input.rate_limits.seven_day.resets_at = NOW / 1000 + 5 * 3600;
-  assert.ok(plain(input).includes('34% ·5h00'));
+  assert.ok(plain(input).includes('34% 5h00'));
 });
 
 test('git null shows only the project; worktree.branch is used when git is null', () => {
-  assert.ok(plain(full(), { git: null }).includes('34% ·Mo   proj   ⚡'));
+  assert.ok(plain(full(), { git: null }).includes('34% Mo  │  proj  │  ⚡'));
   const input = full();
   input.worktree = { name: 'wt', branch: 'feature/x' };
-  assert.ok(plain(input, { git: null }).includes('⎇ feature/x proj'));
+  assert.ok(plain(input, { git: null }).includes('⎇  feature/x  proj'));
 });
 
-test('colour thresholds paint bar and percent', () => {
+const GRAY = '\x1b[38;5;238m';
+const RESET = '\x1b[0m';
+const colored = (input, extra = {}) =>
+  render(input, { columns: 200, now: NOW, git: GIT, color: true, ...extra });
+
+test('model capsule, separators and gradient bar carry the exact colour sequences', () => {
+  const line = colored(full());
+  assert.ok(line.startsWith(
+    '\x1b[38;5;141m▐\x1b[48;5;141m\x1b[38;5;16m\x1b[1m◆ Opus 5.5\x1b[48;5;141m\x1b[38;5;16m high'
+    + `${RESET}\x1b[38;5;141m▌${RESET}`,
+  ), JSON.stringify(line));
+  assert.ok(line.includes(`${GRAY}│\x1b[39m`), 'separator in fg 238');
+  assert.equal(line.split(`  ${GRAY}│`).length - 1, 6);
+  assert.ok(line.includes('\x1b[38;2;90;200;120m━\x1b[39m'), 'cell 0');
+  assert.ok(!line.includes('\x1b[38;2;255;80;120m'), 'cell 7 stays empty at 58%');
+  assert.ok(line.includes(`${GRAY}━\x1b[39m`), 'empty cell');
+  assert.ok(line.includes('\x1b[1m58%'), 'percent is bold');
+  assert.ok(line.includes('\x1b[38;5;245mctx\x1b[39m'), 'label grey');
   const input = full();
-  for (const [pct, code] of [[49, 114], [50, 179], [79, 179], [80, 203]]) {
-    input.context_window.used_percentage = pct;
-    const line = render(input, { columns: 200, now: NOW, git: GIT, color: true });
-    assert.ok(line.includes(`\x1b[38;5;${code}m${pct}%\x1b[39m`), `pct=${pct}`);
-  }
+  input.context_window.used_percentage = 100;
+  assert.ok(colored(input).includes('\x1b[38;2;255;80;120m━\x1b[39m'), 'cell 7');
+});
+
+test('git, cache, duration and reset hint colours', () => {
+  const line = colored(full());
+  assert.ok(line.includes('\x1b[38;5;75m⎇\x1b[39m  \x1b[1mmaster'), JSON.stringify(line));
+  assert.ok(line.includes(' \x1b[38;5;179m●\x1b[39m  \x1b[38;5;245mproj\x1b[39m'), JSON.stringify(line));
+  assert.ok(line.includes('\x1b[38;5;150m⚡\x1b[39m  \x1b[1m3:12'), JSON.stringify(line));
+  assert.ok(line.includes('\x1b[38;5;245m⏱ 1h12\x1b[39m'), JSON.stringify(line));
+  assert.ok(line.includes(' \x1b[38;5;245m2h10\x1b[39m'), JSON.stringify(line));
+  const noClock = full();
+  noClock.prompt_cache.expires_at = null;
+  assert.ok(strip(colored(noClock)).includes('proj  │  ⚡  │  ⏱'));
+  assert.ok(colored(noClock).includes('\x1b[38;5;150m⚡\x1b[39m'));
+  const cold = full();
+  cold.prompt_cache.warm = false;
+  assert.ok(colored(cold).includes('\x1b[38;5;110m❄\x1b[39m'));
+});
+
+test('clean git shows no dirty dot; no branch shows only the grey project', () => {
+  assert.ok(plain(full(), { git: { branch: 'master', dirty: false } }).includes('⎇  master  proj'));
+  const line = colored(full(), { git: null });
+  assert.ok(line.includes('\x1b[38;5;245mproj\x1b[39m') && !line.includes('⎇'), line);
 });
 
 test('color=false emits no escape sequences', () => {
@@ -112,24 +148,26 @@ test('color=false emits no escape sequences', () => {
 test('narrow terminals drop duration, project, cache, then reset hints', () => {
   const at = (columns) => plain(full(), { columns });
   assert.ok(at(200).includes('⏱'));
-  const w100 = at(100);
-  assert.ok(!w100.includes('⏱') && !w100.includes(' proj') && w100.includes('⚡'), w100);
-  const w60 = at(60);
-  assert.equal(w60, '◆ Opus 5.5 high   ctx ▕██▉  ▏58%   5h ▕▋    ▏12%   7d ▕█▊   ▏34%   ⎇ master●');
+  const w115 = at(115);
+  assert.ok(!w115.includes('⏱') && !w115.includes(' proj') && w115.includes('⚡'), w115);
+  const w95 = at(95);
+  assert.equal(w95, ['◆ Opus 5.5 high', 'ctx ━━━━━─── 58%', '5h ━─────── 12%', '7d ━━━───── 34%', '⎇  master ●'].join('  │  '));
 });
 
 test('width fitting ignores ANSI codes: coloured and plain lines drop the same groups', () => {
-  for (const columns of [60, 80, 100, 120, 200]) {
+  for (const columns of [60, 80, 100, 115, 125, 135, 200]) {
     const coloured = render(full(), { columns, now: NOW, git: GIT, color: true });
-    assert.equal(strip(coloured), plain(full(), { columns }), `columns=${columns}`);
-    if (columns >= 80) assert.ok(visibleWidth(coloured) <= columns, `columns=${columns}`);
+    // the colour-only capsule edges and the empty-cell glyph are the only intended differences
+    const norm = (t) => t.replace(/[▐▌]/g, '').replace(/[━─]/g, '-');
+    assert.equal(norm(strip(coloured)), norm(plain(full(), { columns })), `columns=${columns}`);
+    if (columns >= 95) assert.ok(visibleWidth(coloured) <= columns, `columns=${columns}`);
   }
 });
 
 test('empty effort level adds no trailing space', () => {
   const input = full();
   input.effort = { level: '' };
-  assert.match(plain(input), /^◆ Opus 5\.5 {3}ctx/); // gap only, no extra space
+  assert.match(plain(input), /^◆ Opus 5\.5 {2}│ {2}ctx/); // separator only, no extra space
 });
 
 test('out-of-range weekly reset prints no bare reset dot', () => {
@@ -138,5 +176,5 @@ test('out-of-range weekly reset prints no bare reset dot', () => {
   const line = plain(input);
   assert.ok(line.includes('7d'), line);
   assert.ok(!line.includes('undefined'), line);
-  assert.ok(!/·(\s|$)/.test(line.split('7d')[1].split('⎇')[0]), line);
+  assert.ok(/7d [━─]{8} \d+%\s+│/.test(line), line);
 });

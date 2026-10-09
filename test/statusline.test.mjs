@@ -22,8 +22,8 @@ test('full fixture: exit 0, one line, nothing on stderr', () => {
   const r = run(FULL, { NO_COLOR: '1' });
   assert.equal(r.status, 0);
   assert.equal(r.stderr, '');
-  assert.match(r.stdout, /^◆ Opus 5\.5 high {3}ctx ▕██▉ {2}▏58%/);
-  assert.ok(r.stdout.includes('   proj   '), r.stdout); // fixture dir does not exist → no git, project only
+  assert.match(r.stdout, /^◆ Opus 5\.5 high {2}│ {2}ctx ━━━━━─── 58%/);
+  assert.ok(r.stdout.includes('  │  proj  │  '), r.stdout); // fixture dir does not exist → no git, project only
   assert.equal(r.stdout.split('\n').length, 2); // one line plus trailing newline
 });
 
@@ -48,7 +48,7 @@ test('COLUMNS narrows the line (reserved margin applied)', () => {
   const wide = run(FULL, { NO_COLOR: '1', COLUMNS: '204' }).stdout;
   const narrow = run(FULL, { NO_COLOR: '1', COLUMNS: '64' }).stdout;
   assert.ok(wide.includes('⏱'));
-  assert.ok(!narrow.includes('⏱') && !narrow.includes('·'), narrow);
+  assert.ok(!narrow.includes('⏱') && !narrow.includes('2h10'), narrow);
 });
 
 test('missing or invalid COLUMNS still renders the full-featured default width', () => {
