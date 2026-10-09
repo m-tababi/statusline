@@ -15,7 +15,7 @@ A one-line status line for Claude Code. A plain Node script, no dependencies, no
 | 5h | `5h ━─────── 12% 2h10` | `rate_limits.five_hour` | group omitted |
 | 7d | `7d ━━━───── 34% Mo` (under 24 h left: remaining time instead of the weekday) | `rate_limits.seven_day` | group omitted |
 | Git | `⎇  <branch>[ ●]  <project>` | `git` in `workspace.current_dir`; project = basename of `workspace.project_dir` (falls back to `current_dir`) | project only; branch falls back to `worktree.branch` |
-| Cache | `⚡  m:ss` warm, `❄` cold or expired; a warm cache without `expires_at` shows a bare `⚡`; with colour, `⚡` and the clock turn yellow under 10 minutes left and red under 3 | `prompt_cache.warm`, `prompt_cache.expires_at` | group omitted |
+| Cache | `⚡  m:ss` warm, `❄` cold or expired; a warm cache without `expires_at` shows a bare `⚡`; with colour, `⚡` and the clock turn yellow under 10 minutes left and red under 3. With the plugin, a keep-alive marker follows: `↻` armed, `⇡` pinging, `∅` paused, `off` | `prompt_cache.warm`, `prompt_cache.expires_at`; the plugin's state file | group omitted |
 | Duration | `⏱ 1h12` / `45m` | `cost.total_duration_ms` | group omitted |
 
 Groups are separated by `  │  `. The `●` after the branch marks uncommitted changes to tracked files. Weekday abbreviations are German (`So Mo Di Mi Do Fr Sa`).
@@ -56,10 +56,52 @@ Two git calls run in parallel (a detached HEAD adds a third, sequential `rev-par
 
 A timeout or error drops the dirty dot; if the branch lookup fails, the branch is dropped. The line itself stays.
 
+## Keep-alive plugin
+
+The same folder is a Claude Code plugin (`statusline`). It keeps the main conversation's prompt cache warm. Shortly before the cache expires (5 minutes before a 1h entry, after 4 minutes of a 5m one), it sends one tool-less fork of the last request with a one-word prompt. The fork is not in the transcript.
+
+Measured on Claude Code 2.1.295 with Opus 5.5 (2026-10-09): a fork with the default 5m TTL, sent at 4:00 or at 50:00 after the last request, left the 1h main cache warm. A follow-up read came 100 % from the cache, against 24 % and 29 % in the control runs without a fork. No separate fork TTL setting is needed.
+
+Every ping's usage is checked. Each of these pauses the keep-alive until the next real message, after which it turns itself back on:
+
+- a ping that finds the cache cold,
+- an API error,
+- a compaction,
+- a model switch,
+- `/clear`,
+- the end of the session.
+
+It never pings while a turn runs, and never once the entry is about to lapse, so a late timer after sleep pays nothing.
+
+When Claude Code's own cache keep-alive is switched on for the account (feature flag `tengu_sequential_cloud` in `~/.claude.json`, subscription 1h TTL), the plugin leaves the cache to it for as long as Claude Code keeps touching it (by default up to 60 minutes after the last activity) and pings only after that. An unreadable `~/.claude.json` counts as "off". If the flag is on but Claude Code's touches do not actually happen (server not active, a policy forbids them, the request is refused), the plugin waits in vain: the cache lapses an hour after the last activity, the first ping finds it cold and the keep-alive pauses. A "cache was cold" toast while the flag is on points to this.
+
+`/keepalive on|off|status`: on by default; the switch is stored and applies to every session. `status` shows the TTL, the built-in keep-alive flag, the next and the last ping.
+
+Limits:
+
+- A turn that runs or hangs longer than the cache lifetime (for example, a tool waiting for approval) gets no ping, because the plugin never pings during a turn.
+- Without plan limits after the first answer (no subscription) the main TTL is taken as 5m.
+- Overage and Claude Code's own 5m switches are invisible to a plugin; the first ping then finds the cache cold and pauses.
+
+The plugin writes `~/.claude/keepalive/<session_id>.json` (or under `CLAUDE_CONFIG_DIR`), which this script reads, without blocking, to draw the marker. A file older than a day is ignored; old files can be removed with:
+
+```bash
+find ~/.claude/keepalive -name '*.json' -mtime +7 -delete
+```
+
+Each ping reads the whole context from the cache. That costs about a tenth of the input price, against two times the input price for rewriting a 1h entry, so a ping pays for itself while the session is picked up again within about 18 hours. A ping that finds the cache cold writes it again at the 5m rate. Pings count against your plan like any request.
+
+Install from the local marketplace `mohamed-mods`:
+
+```
+/plugin install statusline@mohamed-mods
+```
+
 ## Tests
 
 ```bash
 node --test test/*.test.mjs
+claude plugin test .
 ```
 
 ## License
