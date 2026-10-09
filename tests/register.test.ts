@@ -353,6 +353,23 @@ describe('races', () => {
     expect(seen.forks).toHaveLength(1)
   })
 
+  test('a session that ends while the ping status is written sends no fork', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    await turn($, 't1')
+    seen.afterWrite = async () => {
+      if (!seen.files.get(FILE)?.includes('"pinging"')) return
+      seen.afterWrite = undefined
+      await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+    }
+    void seen.clock.advance(55 * MIN)
+    await seen.clock.settle()
+    expect(seen.forks).toEqual([])
+    expect(status(seen)).toMatchObject({ state: 'paused', reason: REASON.cleared })
+    await seen.clock.advance(2 * 60 * MIN)
+    expect(seen.forks).toEqual([])
+  })
+
   test('a ping in flight at session end writes nothing afterwards', async ($, on) => {
     const seen = world(on)
     let release: (value: ModelForkResult) => void = () => undefined

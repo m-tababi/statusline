@@ -173,6 +173,11 @@ async function ping($: EngineInterface): Promise<void> {
   if (isForking || ended) return
   isForking = true
   await publish($, { ...g, isForking: true }, { kind: 'busy' })
+  // The session may have ended while the status file was written: no fork then.
+  if (ended) {
+    isForking = false
+    return
+  }
   let outcome: ReturnType<typeof settlePing>
   try {
     outcome = settlePing(await $.model.fork({ prompt: FORK_PING_PROMPT }), startedAt)

@@ -48,6 +48,7 @@ export function world(on: On, o: WorldOptions = {}) {
     logs: [] as string[],
     toasts: [] as string[],
     files: new Map<string, string>(),
+    afterWrite: undefined as (() => Promise<void>) | undefined,
     // Files $.fs.read finds (by absolute path); anything else does not exist.
     readable: new Map<string, string>(),
     submits: [] as string[],
@@ -94,8 +95,9 @@ export function world(on: On, o: WorldOptions = {}) {
     seen.toasts.push(e.text)
     return { value: undefined }
   })
-  on('fs.write', ($, e) => {
+  on('fs.write', async ($, e) => {
     seen.files.set(e.path, e.text)
+    await seen.afterWrite?.()
     return { value: undefined }
   })
   on('prompt.submit', ($, e) => {
