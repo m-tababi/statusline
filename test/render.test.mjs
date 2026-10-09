@@ -125,3 +125,18 @@ test('width fitting ignores ANSI codes: coloured and plain lines drop the same g
     if (columns >= 80) assert.ok(visibleWidth(coloured) <= columns, `columns=${columns}`);
   }
 });
+
+test('empty effort level adds no trailing space', () => {
+  const input = full();
+  input.effort = { level: '' };
+  assert.match(plain(input), /^◆ Opus 5\.5 {3}ctx/); // gap only, no extra space
+});
+
+test('out-of-range weekly reset prints no bare reset dot', () => {
+  const input = full();
+  input.rate_limits.seven_day.resets_at = 1e20;
+  const line = plain(input);
+  assert.ok(line.includes('7d'), line);
+  assert.ok(!line.includes('undefined'), line);
+  assert.ok(!/·(\s|$)/.test(line.split('7d')[1].split('⎇')[0]), line);
+});

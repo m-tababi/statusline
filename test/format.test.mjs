@@ -56,6 +56,10 @@ test('weekdayShort uses local time (TZ pinned to UTC in this file)', () => {
   assert.equal(weekdayShort(Date.parse('2026-10-11T23:59:00Z')), 'So');
 });
 
+test('weekdayShort returns an empty string for an out-of-range epoch', () => {
+  assert.equal(weekdayShort(1e20), '');
+});
+
 test('toMs accepts epoch seconds and epoch milliseconds', () => {
   assert.equal(toMs(1791453600), 1791453600000);
   assert.equal(toMs(1791453600000), 1791453600000);

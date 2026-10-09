@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const SCRIPT = new URL('../statusline.mjs', import.meta.url).pathname;
 const FULL = readFileSync(new URL('./fixtures/full.json', import.meta.url), 'utf8');
@@ -58,5 +60,24 @@ test('missing or invalid COLUMNS still renders the full-featured default width',
     assert.equal(r.stderr, '', `cols=${cols}`);
     assert.match(r.stdout, /^◆ Opus 5\.5/, `cols=${cols}`);
     assert.ok(r.stdout.includes('proj'), `cols=${cols}: ${r.stdout}`);
+  }
+});
+
+test('a git that ignores SIGTERM and hangs cannot stall the line (CIFS guarantee)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fakegit-'));
+  try {
+    const fake = join(dir, 'git');
+    writeFileSync(fake, '#!/bin/sh\ntrap "" TERM\nsleep 3\n');
+    chmodSync(fake, 0o755);
+    const input = JSON.stringify({ ...JSON.parse(FULL), workspace: { current_dir: tmpdir() } });
+    const t0 = Date.now();
+    const r = run(input, { NO_COLOR: '1', PATH: `${dir}:${process.env.PATH}` });
+    const elapsed = Date.now() - t0;
+    assert.equal(r.status, 0);
+    assert.equal(r.stderr, '');
+    assert.ok(r.stdout.length > 0);
+    assert.ok(elapsed < 1000, `took ${elapsed} ms`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
