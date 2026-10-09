@@ -1,0 +1,20 @@
+# Dependencies (none expected)
+node_modules/
+
+# Coverage and logs
+coverage/
+*.log
+
+# Local status line captures never belong in the repo
+*.capture.json
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
