@@ -336,3 +336,48 @@ describe('pauses', () => {
     expect(seen.forks).toEqual([])
   })
 })
+
+describe('races', () => {
+  test('overlapping arms leave one live timer: one fork', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    await turn($, 't1')
+    await Promise.all([command($, 'keepalive', 'on'), command($, 'keepalive', 'on'), command($, 'keepalive', 'on')])
+    await seen.clock.advance(55 * MIN)
+    expect(seen.forks).toHaveLength(1)
+  })
+
+  test('a slow fork and further arms still make one fork', async ($, on) => {
+    const seen = world(on)
+    let release: (value: ModelForkResult) => void = () => undefined
+    seen.forkReplies.push(() => new Promise<ModelForkResult>(resolve => (release = resolve)))
+    await start($)
+    await turn($, 't1')
+    await Promise.all([seen.clock.advance(55 * MIN), command($, 'keepalive', 'on'), command($, 'keepalive', 'on')])
+    await seen.clock.advance(MIN)
+    expect(seen.forks).toHaveLength(1)
+    release(forkReply())
+    await seen.clock.settle()
+    expect(seen.forks).toHaveLength(1)
+  })
+
+  test('a ping in flight at session end writes nothing afterwards', async ($, on) => {
+    const seen = world(on)
+    let release: (value: ModelForkResult) => void = () => undefined
+    seen.forkReplies.push(() => new Promise<ModelForkResult>(resolve => (release = resolve)))
+    await start($)
+    await turn($, 't1')
+    void seen.clock.advance(55 * MIN)
+    await seen.clock.settle()
+    expect(status(seen)).toMatchObject({ state: 'pinging' })
+    await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
+    const written = seen.files.get(FILE)
+    release(forkReply(COLD))
+    await seen.clock.settle()
+    expect(seen.files.get(FILE)).toBe(written)
+    expect(status(seen)).toMatchObject({ state: 'paused', reason: REASON.cleared })
+    expect(seen.toasts).toEqual([])
+    await seen.clock.advance(2 * 60 * MIN)
+    expect(seen.forks).toHaveLength(1)
+  })
+})

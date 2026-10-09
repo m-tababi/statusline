@@ -37,6 +37,7 @@ const NO_ANCHOR = 'Noch keine Anfrage in dieser Sitzung – zuerst eine Frage st
 // $ is never stored or bound to a name (the engine refuses that); it is only passed on.
 let isInteractive = false
 let isForking = false
+let ended = false
 let stepsDuringFork = 0
 let pingTimer: Timer | undefined
 let probeTimer: Timer | undefined
@@ -150,8 +151,6 @@ async function publish($: EngineInterface, g: Gate, step: Step): Promise<void> {
 
 // Plans the next ping from the state as it stands, replacing any earlier timer.
 async function arm($: EngineInterface): Promise<void> {
-  pingTimer?.cancel()
-  pingTimer = undefined
   const g = await gateOf($)
   const now = await $.clock.now()
   const step = nextStep(g, now)
@@ -159,6 +158,9 @@ async function arm($: EngineInterface): Promise<void> {
     await update($, pause, () => REASON.late)
     return arm($)
   }
+  // No await from here to the assignment: overlapping arms leave exactly one live timer.
+  pingTimer?.cancel()
+  pingTimer = undefined
   if (step.kind === 'wait' || step.kind === 'ping') {
     const delay = step.kind === 'wait' ? step.at - now : 0
     pingTimer = $.clock.after(delay, () => {
@@ -170,12 +172,14 @@ async function arm($: EngineInterface): Promise<void> {
 
 async function ping($: EngineInterface): Promise<void> {
   pingTimer = undefined
-  if (isForking) return
+  if (isForking || ended) return
   const g = await gateOf($)
   const startedAt = await $.clock.now()
   // Everything is checked again: the switch, a turn, a pause, the built-in window, a late timer.
   if (nextStep(g, startedAt).kind !== 'ping') return arm($)
 
+  // The lock is claimed with no await since this check: a second timer cannot slip in.
+  if (isForking || ended) return
   isForking = true
   stepsDuringFork = 0
   await publish($, { ...g, isForking: true }, { kind: 'busy' })
@@ -185,8 +189,10 @@ async function ping($: EngineInterface): Promise<void> {
   } catch (err) {
     outcome = { pause: `Ping fehlgeschlagen: ${err instanceof Error ? err.message : String(err)}`, ping: null }
   } finally {
-    isForking = false
+    if (!ended) isForking = false
   }
+  // The session ended while the fork ran: nothing is written afterwards.
+  if (ended) return
 
   const isRefreshed = outcome.pause === null && outcome.ping !== null
   await update($, anchor, current => anchorAfterPing(current, startedAt, isRefreshed))
@@ -303,7 +309,7 @@ async function keepaliveCommand($: EngineInterface, args: string): Promise<strin
 // A main-thread request that got a response: the new anchor and activity, the
 // end of any pause, and a pending probe's follow-up.
 async function onMainRequest($: EngineInterface, at: number, usage: TurnUsage): Promise<void> {
-  await update($, anchor, old => (old !== null && old.at > at ? old : { at, source: 'turn' }))
+  await update($, anchor, old => (old !== null && old.at > at ? old : { at, source: 'turn' as const }))
   await update($, activityAt, old => Math.max(old ?? 0, at))
   await update($, pause, () => null)
   const pending = await read($, probe)
@@ -324,6 +330,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     isInteractive = e.isInteractive
+    ended = false
     builtinCache = undefined
     await $.command.register({
       name: 'keepalive',
@@ -351,6 +358,7 @@ export const register: Register = on => {
 
   // turn.start is raised for the main loop only.
   on('turn.start', async ($, e, next) => {
+    ended = false
     await update($, isTurnRunning, () => true)
     await arm($)
     return next(e)
@@ -402,6 +410,9 @@ export const register: Register = on => {
   // /clear ends the conversation without a session.start; the file still names the ending id.
   // Timers go first and synchronously: the end has a short budget.
   on('session.end', async ($, e, next) => {
+    // The fork in flight is abandoned: its answer is dropped, and the ending file shows the pause.
+    ended = true
+    isForking = false
     cancelTimers()
     await update($, probe, () => null)
     await hold($, e.reason === 'clear' ? REASON.cleared : REASON.ended)
