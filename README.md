@@ -15,13 +15,13 @@ A one-line status line for Claude Code. A plain Node script, no dependencies, no
 | 5h | `5h ▕bar▏12% ·2h10` | `rate_limits.five_hour` | group omitted |
 | 7d | `7d ▕bar▏34% ·Mo` (under 24 h left: remaining time instead of the weekday) | `rate_limits.seven_day` | group omitted |
 | Git | `⎇ <branch>[●] <project>` | `git` in `workspace.current_dir`; project = basename of `workspace.project_dir` (falls back to `current_dir`) | project only; branch falls back to `worktree.branch` |
-| Cache | `⚡ m:ss` warm, `❄` cold or expired | `prompt_cache.warm`, `prompt_cache.expires_at` | group omitted |
+| Cache | `⚡ m:ss` warm, `❄` cold or expired; a warm cache without `expires_at` shows a bare `⚡` | `prompt_cache.warm`, `prompt_cache.expires_at` | group omitted |
 | Duration | `⏱ 1h12` / `45m` | `cost.total_duration_ms` | group omitted |
 
 The `●` after the branch marks uncommitted changes to tracked files. Weekday abbreviations are German (`So Mo Di Mi Do Fr Sa`).
 
-Bars and percentages are green below 50 %, yellow below 80 %, red from 80 %. Set `NO_COLOR` to turn colours off.
-When the line is too wide, groups are dropped in this order until it fits: duration, project name, cache, reset hints.
+Bars and percentages are green below 50 %, yellow below 80 %, red from 80 %. Colours are off when `NO_COLOR` is set and non-empty. Weekdays and reset times use the local system time.
+When the line is too wide, parts are dropped in this order until it fits: duration, project name, cache, reset hints. If it still does not fit after all drops, it is printed anyway and the host truncates it.
 Input that is not valid JSON or not a JSON object prints `◆ Claude`. The script always exits 0, because a non-zero exit blanks the line.
 
 ## Install
@@ -50,7 +50,7 @@ The script reads `COLUMNS` (120 if missing or invalid) and keeps 4 columns spare
 
 ## Git
 
-Two git calls run in parallel, each with a 300 ms timeout, a 400 ms hard deadline and `--no-optional-locks`:
+Two git calls run in parallel (a detached HEAD adds a third, sequential `rev-parse --short`), each with a 300 ms timeout, a 400 ms hard deadline and `--no-optional-locks`:
 - `rev-parse --abbrev-ref HEAD` gives the branch. A detached HEAD shows the short SHA.
 - `status --porcelain -uno` checks tracked files only, which keeps it fast on network shares.
 
