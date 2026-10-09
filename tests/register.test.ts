@@ -21,12 +21,15 @@ const SLOW_PINGING = {
   },
 }
 
-/** What the hint line draws from, with the reason and the next ping as /keepalive status says them. */
+const STATE_OF: Record<string, string> = { bereit: 'armed', 'pingt gerade': 'pinging', pausiert: 'paused' }
+
+/** The keep-alive's state, reason and next ping as /keepalive status says them, with the hint line's anchor. */
 async function status($: Engine) {
   const snap = (await peek($)).hint
   const lines = (await command($, 'keepalive', 'status')).split('\n')
+  const word = /^Keep-alive an \(diese Sitzung\) · ([^:]+)/.exec(lines[0] ?? '')?.[1]
   return {
-    state: snap?.state ?? null,
+    state: word === undefined ? (lines[0] === 'Keep-alive aus (diese Sitzung)' ? 'off' : null) : (STATE_OF[word] ?? word),
     anchorAt: snap?.anchorAt ?? null,
     isCold: snap?.isCold ?? null,
     reason: /^Keep-alive an \(diese Sitzung\) · [^:]+: (.*)$/.exec(lines[0] ?? '')?.[1] ?? null,
@@ -376,11 +379,11 @@ describe('hint line', () => {
     expect(seen.invalidates).toBe(ticks)
   })
 
-  test('no clock and no tick before the first answer', async ($, on) => {
+  test('no clock and no tick before the first answer; the switch shows on', async ($, on) => {
     const seen = world(on)
     await start($)
     const ui = await hintLine($)
-    expect(await texts(ui)).toEqual([PILL.paused.long])
+    expect(await texts(ui)).toEqual([PILL.armed.long])
     const ticks = seen.invalidates
     await seen.clock.advance(10_000)
     expect(seen.invalidates).toBe(ticks)
@@ -391,16 +394,65 @@ describe('hint line', () => {
     expect(await texts(ui)).toEqual(['⚡  59:57', PILL.armed.long])
   })
 
-  test('no clock after /clear', async ($, on) => {
+  test('no clock after /clear; the switch shows on', async ($, on) => {
     const seen = world(on)
     await start($)
     await turn($, 't1')
     await $.session.end({ reason: 'clear', sessionId: 's1', resume: { id: 's1' } })
     const ui = await hintLine($)
-    expect(await texts(ui)).toEqual([PILL.paused.long])
+    expect(await texts(ui)).toEqual([PILL.armed.long])
     const ticks = seen.invalidates
     await seen.clock.advance(10_000)
     expect(seen.invalidates).toBe(ticks)
+  })
+
+  test('a compaction shows no clock and the pause', async ($, on) => {
+    world(on)
+    await start($)
+    await turn($, 't1')
+    await $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'summary', toolUses: [] }] })
+    const ui = await hintLine($)
+    expect(await texts(ui)).toEqual([PILL.paused.long])
+  })
+
+  test('the clock starts from the first request, before the turn ends', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    await $.turn.start({ text: 'x', turnId: 't1' })
+    await stepOnly($, 't1')
+    const ui = await hintLine($)
+    expect(await texts(ui)).toEqual(['⚡  60:00', PILL.armed.long])
+    await seen.clock.advance(1000)
+    expect(await texts(ui)).toEqual(['⚡  59:59', PILL.armed.long])
+  })
+
+  test('a request inside a running turn re-dates the clock at once', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    await turn($, 't1')
+    await seen.clock.advance(30 * MIN)
+    await $.turn.start({ text: 'x', turnId: 't2' })
+    await stepOnly($, 't2')
+    const ui = await hintLine($)
+    await seen.clock.advance(1000)
+    expect(await texts(ui)).toEqual(['⚡  59:59', PILL.armed.long])
+    // The ping timing is the turn end's: 55 minutes after this request.
+    await complete($, 't2')
+    await seen.clock.advance(55 * MIN - 1001)
+    expect(seen.forks).toEqual([])
+    await seen.clock.advance(1)
+    expect(seen.forks).toEqual([FORK_PING_PROMPT])
+  })
+
+  test('a surface too narrow for the clock does not stop its tick', async ($, on) => {
+    const seen = world(on)
+    await start($)
+    await turn($, 't1')
+    const wide = await hintLine($)
+    const narrow = await hintLine($, { columns: HINT.length + 8 + 15 })
+    expect(await narrow.drawn()).toEqual(ENGINE_LINE)
+    await seen.clock.advance(3000)
+    expect(await texts(wide)).toEqual(['⚡  59:57', PILL.armed.long])
   })
 
   test('a cold ping shows the snowflake at once, paused', async ($, on) => {

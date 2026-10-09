@@ -283,7 +283,11 @@ export const register: Register = on => {
     const result = yield* next(e)
     // The response stands whatever the bookkeeping does.
     try {
-      if (result.usage !== null) await onMainRequest($, at)
+      if (result.usage !== null) {
+        await onMainRequest($, at)
+        // The turn runs, so this plans no ping; it redraws the hint line's clock from the new request.
+        await arm($)
+      }
     } catch {
       // The next request or turn end plans again.
     }
@@ -337,7 +341,8 @@ export const register: Register = on => {
     const snap = await read($, hint)
     const clock = snap === null ? null : hintClock(snap, await $.clock.now())
     const size = snap === null ? null : hintSize(e.viewport?.columns, e.props.hint, clock, snap.state)
-    if (size !== null && clock?.kind === 'warm') keepTicking($, clock.leftMs)
+    // A clock counts down whether or not this surface has room for it: another may draw it.
+    if (clock?.kind === 'warm') keepTicking($, clock.leftMs)
     else stopTicker()
     if (snap === null || size === null) return below
 

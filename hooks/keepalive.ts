@@ -151,8 +151,10 @@ export function displayOf(g: Gate, step: Step): Display {
 export function hintOf(g: Gate, step: Step, last: KeepalivePing | null): KeepaliveHint {
   const anchorAt = g.anchor?.at ?? null
   const builtin = isBuiltinActive(g) ? { windowMs: g.builtin.windowMs, touchMs: g.builtin.touchMs } : null
+  // Waiting for the first answer (or the first after /clear) is no pause of the switch: it shows on.
+  const isStarting = step.kind === 'hold' && (step.reason === REASON.noAnchor || step.reason === REASON.cleared)
   return {
-    state: displayOf(g, step).state,
+    state: isStarting ? 'armed' : displayOf(g, step).state,
     anchorAt,
     // A ping that found the entry cold leaves the anchor where it was; only a newer request warms it again.
     isCold: last !== null && !last.isWarm && anchorAt !== null && last.at >= anchorAt,

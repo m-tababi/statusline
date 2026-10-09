@@ -154,7 +154,12 @@ const hint = (o: Partial<KeepaliveHint> = {}): KeepaliveHint => ({
 
 test('hint snapshot: anchor, TTL, the active built-in keep-alive, a cold last ping', () => {
   expect(hintOf(gate(), { kind: 'wait', at: T0 + 55 * MIN }, null)).toEqual(hint())
-  expect(hintOf(gate({ anchor: null }), { kind: 'hold', reason: REASON.noAnchor }, null)).toEqual(hint({ state: 'paused', anchorAt: null }))
+  // Waiting for the first answer, or after /clear, the switch is on: the pill says so.
+  expect(hintOf(gate({ anchor: null }), { kind: 'hold', reason: REASON.noAnchor }, null)).toEqual(hint({ state: 'armed', anchorAt: null }))
+  expect(hintOf(gate({ anchor: null }), { kind: 'hold', reason: REASON.cleared }, null).state).toBe('armed')
+  expect(hintOf(gate({ anchor: null }), { kind: 'hold', reason: REASON.compacted }, null).state).toBe('paused')
+  expect(hintOf(gate({ anchor: null }), { kind: 'hold', reason: REASON.modelSwitch }, null).state).toBe('paused')
+  expect(hintOf(gate({ anchor: null, isEnabled: false }), { kind: 'off' }, null).state).toBe('off')
   expect(hintOf(gate({ main: { ttl: '5m', source: 'x' } }), { kind: 'busy' }, null).ttlMs).toBe(5 * MIN)
   expect(hintOf(gate({ builtin: ON }), { kind: 'busy' }, null).builtin).toEqual({ windowMs: 60 * MIN, touchMs: 30_000 })
   // Not active at a TTL set by environment or settings.
