@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import {
-  fmtSpan, fmtTokens, forkTtl, isFlag, isWarm, mainTtl, parseSpan, pickUsage, promptTokens, ttlLine, usageLine,
+  fmtSpan, fmtTokens, forkTtl, isFlag, isWarm, mainTtl, pickUsage, promptTokens, ttlLine, usageLine,
 } from '../hooks/cache'
 
 const u = (read: number, write: number, input = 3) => ({
@@ -59,12 +59,4 @@ test('formatting', () => {
   expect(fmtSpan(65 * 60_000)).toBe('1h05')
   expect(fmtSpan(-5)).toBe('0:00')
   expect(ttlLine({ ttl: '1h', source: 'a' }, { ttl: '5m', source: 'b' })).toBe('TTL Hauptverlauf 1h (a) · Fork 5m (b)')
-})
-
-test('spans: seconds, minutes, hours; nothing else', () => {
-  expect(parseSpan('90s')).toBe(90_000)
-  expect(parseSpan('4m')).toBe(240_000)
-  expect(parseSpan(' 50M ')).toBe(3_000_000)
-  expect(parseSpan('1h')).toBe(3_600_000)
-  for (const bad of ['', '0m', '4', '4 m', 'm', '-4m', '4.5m', '99999m']) expect(parseSpan(bad)).toBe(null)
 })

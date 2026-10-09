@@ -1,4 +1,4 @@
-// Prompt-cache facts shared by the probe and the keep-alive: which TTL the
+// Prompt-cache facts used by the keep-alive: which TTL the
 // main conversation and a fork get (in the order Claude Code 2.1.295 checks
 // them), and how to read a request's usage.
 import type { ModelUsage } from 'claude-code'
@@ -80,15 +80,6 @@ export function fmtSpan(ms: number): string {
   const m = Math.floor((total % 3600) / 60)
   const s = total % 60
   return h > 0 ? `${h}h${String(m).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`
-}
-
-/** "90s", "4m", "1h" in milliseconds; anything else, or zero, is null. */
-export function parseSpan(text: string): number | null {
-  const m = /^(\d{1,4})(s|m|h)$/.exec(text.trim().toLowerCase())
-  if (m === null || m[1] === undefined || m[2] === undefined) return null
-  const n = Number(m[1])
-  if (n <= 0) return null
-  return n * (m[2] === 's' ? 1000 : m[2] === 'm' ? 60_000 : 3_600_000)
 }
 
 export function usageLine(u: KeepaliveUsage): string {

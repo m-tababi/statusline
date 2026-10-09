@@ -13,7 +13,7 @@ export const MARGIN_SHARE = 0.2
 export const SAFETY_MS = 20_000
 // How often the plugin reads Claude Code's own keep-alive flag again.
 export const BUILTIN_REFRESH_MS = 10 * 60_000
-// Set by the probe (Task 2): true when a fork keeps the 1h entry only with a 1h fork TTL (R2).
+// Measured 2026-10-09 (fork at 4:00 and 50:00 kept the 1h entry warm): false. True would mean a fork keeps the 1h entry only with a 1h fork TTL.
 export const FORK_TTL_MUST_MATCH = false
 export const FORK_PING_PROMPT =
   '[keepalive] Automatic prompt cache refresh, not a message from the user. Do not call any tools. Reply with the single word ok.'

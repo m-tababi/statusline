@@ -75,7 +75,7 @@ test('while the built-in keep-alive touches the entry, the plugin waits for the 
   expect(coveredAnchor(gate({ builtin: ON, activityAt: null }), T0, T0 + 30 * MIN)).toBe(T0)
 })
 
-test('a short fork TTL holds only when the probe said it must match', () => {
+test('a short fork TTL holds only when the measurement said it must match', () => {
   expect(nextStep(gate({ forkTtlMustMatch: true }), T0)).toEqual({ kind: 'hold', reason: REASON.forkTtl })
   expect(nextStep(gate({ forkTtlMustMatch: true, fork: { ttl: '1h', source: 'x' } }), T0).kind).toBe('wait')
   expect(nextStep(gate({ forkTtlMustMatch: false }), T0).kind).toBe('wait')

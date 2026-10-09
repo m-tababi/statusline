@@ -271,14 +271,6 @@ describe('/keepalive', () => {
     expect(seen.forks).toEqual([])
     expect(status(seen)).toMatchObject({ state: 'off' })
   })
-
-  test('the probe refuses while the keep-alive is on', async ($, on) => {
-    const seen = world(on)
-    await start($)
-    await turn($, 't1')
-    expect(await command($, 'keepalive-probe', 'now')).toBe('Erst /keepalive off – sonst verfälschen die Pings die Messung.')
-    expect(seen.forks).toEqual([])
-  })
 })
 
 describe('pauses', () => {
