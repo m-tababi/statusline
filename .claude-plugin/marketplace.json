@@ -1,0 +1,16 @@
+{
+  "name": "statusline",
+  "owner": {
+    "name": "Mohamed Tababi"
+  },
+  "metadata": {
+    "description": "Single-plugin marketplace for statusline."
+  },
+  "plugins": [
+    {
+      "name": "statusline",
+      "source": "./",
+      "description": "Prompt-cache keep-alive: a tool-less fork ping shortly before the cache expires, a cache clock and a per-session switch (/keepalive on|off|status) in the prompt hint line."
+    }
+  ]
+}

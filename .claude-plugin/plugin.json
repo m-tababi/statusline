@@ -1,9 +1,19 @@
 {
   "name": "statusline",
   "version": "0.1.0",
-  "author": { "name": "Mohamed Tababi" },
+  "author": {
+    "name": "Mohamed Tababi"
+  },
   "description": "Keeps the prompt cache warm with a tool-less fork shortly before it expires and shows the cache clock and a per-session switch in the prompt hint line (/keepalive on|off|status).",
   "license": "MIT",
-  "keywords": ["prompt-cache", "keepalive", "statusline"],
+  "homepage": "https://github.com/m-tababi/statusline",
+  "repository": "https://github.com/m-tababi/statusline",
+  "keywords": [
+    "prompt-cache",
+    "keepalive",
+    "statusline",
+    "status-line",
+    "claude-code"
+  ],
   "types": "./types/index.d.ts"
 }

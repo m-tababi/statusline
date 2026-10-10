@@ -25,7 +25,17 @@ Input that is not valid JSON or not a JSON object prints `◆ Claude`. The scrip
 
 ## Install
 
-`~/.claude/settings.json`:
+The repository holds two parts that are installed separately: the status line script and the keep-alive plugin. You can use either one or both.
+
+### Status line script
+
+Requires Node.js 18 or newer. There are no dependencies to install.
+
+```sh
+git clone https://github.com/m-tababi/statusline.git
+```
+
+The repository is private, so cloning needs read access to `m-tababi/statusline` through your git or GitHub credentials. Then add to `~/.claude/settings.json`:
 
 ```json
 "statusLine": {
@@ -35,13 +45,34 @@ Input that is not valid JSON or not a JSON object prints `◆ Claude`. The scrip
 }
 ```
 
-`refreshInterval` is in seconds (minimum 1). Use an absolute path to `node`, so the line also works when Claude Code starts without your version manager on `PATH`.
+`refreshInterval` is in seconds (minimum 1). Use an absolute path to `node` (`command -v node` shows it), so the line also works when Claude Code starts without your version manager on `PATH`.
 
 If you use nvm, the path contains the Node version and goes stale after an upgrade; the line then turns blank. Check that the binary still exists and update the version in `statusLine.command`:
 
 ```bash
 ls /path/to/node || ls ~/.nvm/versions/node/
 ```
+
+### Keep-alive plugin
+
+The repository is its own single-plugin marketplace. It is private, so whoever installs it needs read access to `m-tababi/statusline` through their git or GitHub credentials.
+
+From a shell:
+
+```sh
+claude plugin marketplace add m-tababi/statusline
+claude plugin install statusline@statusline
+```
+
+Or at the prompt of a Claude Code terminal session:
+
+```
+/plugin install statusline --marketplace m-tababi/statusline
+```
+
+Use one install source at a time: the plugin is either installed from this marketplace or loaded from a local checkout, not both.
+
+The keep-alive is on by default in every session. Its pings are real requests that read the whole context from the cache, so they count against your plan limits (see the cost note under Keep-alive plugin). To turn it off for the current session, run `/keepalive off` or click the pill in the hint line; `/keepalive on` or another click turns it back on.
 
 ## Width
 
@@ -101,13 +132,7 @@ Limits:
 
 Older versions of the plugin wrote a state file per session to `~/.claude/keepalive/` for the status line. Nothing writes or reads it any more; the folder can be removed.
 
-Each ping reads the whole context from the cache. That costs about a tenth of the input price, against two times the input price for rewriting a 1h entry, so a ping pays for itself while the session is picked up again within about 18 hours. A ping that finds the cache cold writes it again at the 5m rate. Pings count against your plan like any request.
-
-Install from the local marketplace `mohamed-mods`:
-
-```
-/plugin install statusline@mohamed-mods
-```
+Each ping reads the whole context from the cache. That costs about a tenth of the input price, against two times the input price for rewriting a 1h entry, so a ping pays for itself while the session is picked up again within about 18 hours. A ping that finds the cache cold writes it again at the 5m rate. Pings count against your plan like any request, so switch the keep-alive off in sessions where you do not need a warm cache.
 
 ## Tests
 
