@@ -35,7 +35,7 @@ Requires Node.js 18 or newer. There are no dependencies to install.
 git clone https://github.com/m-tababi/statusline.git
 ```
 
-The repository is private, so cloning needs read access to `m-tababi/statusline` through your git or GitHub credentials. Then add to `~/.claude/settings.json`:
+Then add to `~/.claude/settings.json`:
 
 ```json
 "statusLine": {
@@ -55,7 +55,7 @@ ls /path/to/node || ls ~/.nvm/versions/node/
 
 ### Keep-alive plugin
 
-The repository is its own single-plugin marketplace. It is private, so whoever installs it needs read access to `m-tababi/statusline` through their git or GitHub credentials.
+The repository is its own single-plugin marketplace.
 
 From a shell:
 
